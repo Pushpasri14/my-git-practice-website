@@ -74,6 +74,11 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 LLM_MODEL = "openai/gpt-4o"  # Upgraded from gpt-3.5-turbo for higher-quality, more creative output
 FALLBACK_LLM_MODEL = "anthropic/claude-3.5-sonnet"  # Optional fallback if the primary model is unavailable
 
+# Fast analysis configuration (optional, does not change default behavior)
+FAST_MAX_FRAMES = int(os.getenv("FAST_MAX_FRAMES", "200"))  # total frames sampled across the entire video
+FAST_RESIZE_MAX_WIDTH = int(os.getenv("FAST_RESIZE_MAX_WIDTH", "640"))
+FAST_GAZE_HOLD_SECONDS = float(os.getenv("FAST_GAZE_HOLD_SECONDS", "0.05"))  # shorter hold for fast counting
+
 
 def create_directories():
     """Create necessary directories if they don't exist"""
@@ -1081,6 +1086,308 @@ def video_display(user_name, video_path):
         with data_lock:
             shared_data['is_running'] = False
 
+# --- FAST ANALYSIS MODE (optional) ---
+
+def fast_analyze_video(user_name: str, video_path: str):
+    """Analyze the video quickly by sampling a limited number of frames across its duration.
+    - Skips realtime UI and runs as fast as possible
+    - Uses faster detector backend for DeepFace
+    - Writes a shorter analyzed video composed of sampled frames
+    """
+    global current_frame, VIDEO_WRITER, ANALYZED_VIDEO_PATH
+    print("⚡ Fast analysis mode enabled (sampling).")
+
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        print(f"❌ Cannot open video file: {video_path}")
+        return
+
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    if not fps or fps <= 0:
+        fps = 25.0
+    duration = total_frames / fps if fps > 0 else 0
+
+    # Choose sampled frame indices (uniform across the video)
+    num_samples = min(FAST_MAX_FRAMES, total_frames) if total_frames > 0 else 0
+    if num_samples <= 0:
+        print("❌ No frames to process.")
+        cap.release()
+        return
+    frame_indices = np.linspace(0, max(0, total_frames - 1), num_samples, dtype=int)
+
+    # Read first frame to initialize writer
+    cap.set(cv2.CAP_PROP_POS_FRAMES, int(frame_indices[0]))
+    ok, first_frame = cap.read()
+    if not ok:
+        print("❌ Unable to read first frame for fast analysis.")
+        cap.release()
+        return
+    frame_height, frame_width = first_frame.shape[:2]
+
+    # Initialize writer for a shorter analyzed video (sampled frames)
+    try:
+        fourcc = cv2.VideoWriter_fourcc(*VIDEO_CODEC)
+        VIDEO_WRITER = cv2.VideoWriter(
+            ANALYZED_VIDEO_PATH,
+            fourcc,
+            max(10.0, min(30.0, fps)),  # reasonable playback rate
+            (frame_width, frame_height)
+        )
+        print(f"🎥 Writing fast analyzed video to: {os.path.abspath(ANALYZED_VIDEO_PATH)}")
+    except Exception as e:
+        print(f"⚠️ Could not initialize video writer: {e}")
+        VIDEO_WRITER = None
+
+    # Prepare detectors (optimized configs)
+    mp_hands = mp.solutions.hands
+    hands = mp_hands.Hands(
+        static_image_mode=True,
+        max_num_hands=2,
+        min_detection_confidence=0.6,
+        min_tracking_confidence=0.6
+    )
+    mp_drawing = mp.solutions.drawing_utils
+
+    mp_face_mesh = mp.solutions.face_mesh
+    face_mesh = mp_face_mesh.FaceMesh(
+        static_image_mode=True,
+        max_num_faces=1,
+        refine_landmarks=False,
+        min_detection_confidence=0.6,
+        min_tracking_confidence=0.6
+    )
+
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    white_color = (255, 255, 255)
+    cyan_color = (255, 255, 0)
+    green_color = (0, 255, 0)
+    red_color = (0, 0, 255)
+    yellow_color = (0, 255, 255)
+    magenta_color = (255, 0, 255)
+
+    # Make gaze counting easier in fast mode
+    with data_lock:
+        shared_data['gaze_hold_duration'] = FAST_GAZE_HOLD_SECONDS
+
+    processed = 0
+    log_every = max(1, num_samples // 10)
+
+    try:
+        for idx_i, frame_idx in enumerate(frame_indices):
+            cap.set(cv2.CAP_PROP_POS_FRAMES, int(frame_idx))
+            ret, frame = cap.read()
+            if not ret:
+                continue
+
+            current_frame = frame.copy()
+            frame_height, frame_width = frame.shape[:2]
+            current_time_sec = frame_idx / fps if fps > 0 else 0
+            with data_lock:
+                shared_data['video_timestamp'] = current_time_sec
+
+            # Optional resize for DeepFace speed
+            scale = 1.0
+            if frame_width > FAST_RESIZE_MAX_WIDTH:
+                scale = FAST_RESIZE_MAX_WIDTH / float(frame_width)
+                frame_small = cv2.resize(frame, (int(frame_width * scale), int(frame_height * scale)))
+            else:
+                frame_small = frame
+
+            # Emotion detection (fast backend)
+            try:
+                predictions = DeepFace.analyze(
+                    img_path = frame_small,
+                    actions=['emotion'],
+                    enforce_detection=False,
+                    detector_backend='mediapipe',
+                    silent=True
+                )
+                current_time = time.time()
+                with data_lock:
+                    if predictions and len(predictions) > 0:
+                        raw_emotions = predictions[0]['emotion']
+                        region = predictions[0]['region']
+                        # Map region to original frame if resized
+                        if scale != 1.0 and region is not None:
+                            region = {
+                                'x': int(region['x'] / scale),
+                                'y': int(region['y'] / scale),
+                                'w': int(region['w'] / scale),
+                                'h': int(region['h'] / scale),
+                            }
+                        smoothed_emotion, smoothed_scores = smooth_emotions(
+                            raw_emotions,
+                            shared_data['emotion_history'],
+                            shared_data['emotion_smoothing_window']
+                        )
+                        if smoothed_emotion and smoothed_scores:
+                            is_stable = track_emotion_duration(
+                                smoothed_emotion,
+                                current_time,
+                                shared_data['emotion_start_time'],
+                                shared_data['emotion_duration_threshold']
+                            )
+                            reset_emotion_tracking(shared_data['emotion_start_time'], smoothed_emotion)
+                            shared_data['emotions'] = smoothed_scores
+                            shared_data['face_region'] = region
+                            if is_stable:
+                                shared_data['stable_emotion'] = smoothed_emotion
+                                shared_data['dominant_emotion'] = smoothed_emotion
+                                shared_data['confirmed_emotions'][smoothed_emotion] = current_time
+                            else:
+                                shared_data['dominant_emotion'] = f"{smoothed_emotion} (detecting...)"
+                        else:
+                            shared_data['dominant_emotion'] = "neutral"
+                            shared_data['emotions'] = raw_emotions if raw_emotions else {}
+                            shared_data['face_region'] = region
+                            shared_data['emotion_start_time'].clear()
+                    else:
+                        shared_data['dominant_emotion'] = "No Face"
+                        shared_data['stable_emotion'] = "No Face"
+                        shared_data['emotions'] = {}
+                        shared_data['face_region'] = None
+                        shared_data['emotion_start_time'].clear()
+            except Exception:
+                with data_lock:
+                    shared_data['dominant_emotion'] = "No Face"
+                    shared_data['emotions'] = {}
+                    shared_data['face_region'] = None
+
+            # Hand detection (single-frame, static mode)
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            hand_results = hands.process(frame_rgb)
+            with data_lock:
+                if hand_results.multi_hand_landmarks:
+                    shared_data['hand_status'] = "Active"
+                    shared_data['hand_landmarks'] = hand_results.multi_hand_landmarks
+                else:
+                    shared_data['hand_status'] = "Inactive"
+                    shared_data['hand_landmarks'] = []
+
+            # Eye tracking (single-frame)
+            face_results = face_mesh.process(frame_rgb)
+            with data_lock:
+                if face_results.multi_face_landmarks:
+                    face_landmarks = face_results.multi_face_landmarks[0]
+                    try:
+                        left_iris_center = get_iris_center(face_landmarks, LEFT_IRIS, frame_width, frame_height)
+                        right_iris_center = get_iris_center(face_landmarks, RIGHT_IRIS, frame_width, frame_height)
+                        left_eye_center = get_eye_center(face_landmarks, LEFT_EYE, frame_width, frame_height)
+                        right_eye_center = get_eye_center(face_landmarks, RIGHT_EYE, frame_width, frame_height)
+
+                        left_gaze_ratio = calculate_gaze_ratio(left_iris_center, left_eye_center)
+                        right_gaze_ratio = calculate_gaze_ratio(right_iris_center, right_eye_center)
+                        shared_data['left_iris_x'] = left_gaze_ratio
+                        shared_data['right_iris_x'] = right_gaze_ratio
+
+                        combined_gaze = (left_gaze_ratio + right_gaze_ratio) / 2
+                        shared_data['combined_ratio'] = combined_gaze
+
+                        gaze_history = shared_data.get('gaze_history', [])
+                        gaze_history.append(combined_gaze)
+                        if len(gaze_history) > 8:
+                            gaze_history = gaze_history[-8:]
+                        shared_data['gaze_history'] = gaze_history
+                        smoothed_gaze = np.mean(gaze_history)
+
+                        new_gaze_direction = "center"
+                        if smoothed_gaze < 0.40:
+                            new_gaze_direction = "left"
+                        elif smoothed_gaze > 0.65:
+                            new_gaze_direction = "right"
+
+                        current_time = time.time()
+                        if new_gaze_direction != shared_data['current_gaze_direction']:
+                            shared_data['previous_gaze_direction'] = shared_data['current_gaze_direction']
+                            shared_data['current_gaze_direction'] = new_gaze_direction
+                            shared_data['gaze_start_time'] = current_time
+                            shared_data['gaze_counted'] = False
+                            shared_data['screenshot_taken'] = False
+
+                        if new_gaze_direction in ["left", "right"] and not shared_data['gaze_counted']:
+                            time_held = current_time - shared_data['gaze_start_time']
+                            if time_held >= shared_data['gaze_hold_duration']:
+                                shared_data['eye_turn_count'] += 1
+                                shared_data['gaze_counted'] = True
+                                if not shared_data['screenshot_taken'] and current_frame is not None:
+                                    _ = save_screenshot(current_frame, user_name, new_gaze_direction, shared_data['video_timestamp'])
+                                    shared_data['screenshot_taken'] = True
+                    except Exception:
+                        shared_data['current_gaze_direction'] = "center"
+                else:
+                    shared_data['current_gaze_direction'] = "center"
+
+            # Drawing overlays (same as normal mode but no window)
+            with data_lock:
+                if shared_data['face_region']:
+                    fr = shared_data['face_region']
+                    cv2.rectangle(frame, (fr['x'], fr['y']), (fr['x'] + fr['w'], fr['y'] + fr['h']), (255, 0, 0), 2)
+
+                if shared_data['hand_landmarks']:
+                    for hl in shared_data['hand_landmarks']:
+                        mp_drawing.draw_landmarks(
+                            frame, hl, mp_hands.HAND_CONNECTIONS,
+                            mp_drawing.DrawingSpec(color=(0, 255, 0), thickness=2, circle_radius=4),
+                            mp_drawing.DrawingSpec(color=(0, 0, 255), thickness=2, circle_radius=2)
+                        )
+
+                text_y = 30
+                video_time_display = format_video_time(shared_data['video_timestamp'])
+                total_time_display = format_video_time(duration)
+                cv2.putText(frame, f"Video: {os.path.basename(video_path)}", (10, text_y), font, 0.6, cyan_color, 1, cv2.LINE_AA)
+                text_y += 25
+                cv2.putText(frame, f"Time: {video_time_display} / {total_time_display}", (10, text_y), font, 0.6, cyan_color, 1, cv2.LINE_AA)
+                text_y += 35
+                emotion_display = shared_data['dominant_emotion']
+                emotion_color = white_color if "(detecting...)" not in emotion_display else yellow_color
+                if emotion_display == "No Face":
+                    emotion_color = (128, 128, 128)
+                cv2.putText(frame, f"Emotion: {emotion_display}", (10, text_y), font, 0.8, emotion_color, 2, cv2.LINE_AA)
+                text_y += 40
+                cv2.putText(frame, "Emotion Confidence:", (10, text_y), font, 0.7, white_color, 1, cv2.LINE_AA)
+                text_y += 25
+                for emotion, score in shared_data['emotions'].items():
+                    conf_color = green_color if score >= 40 else (yellow_color if score >= 25 else (128, 128, 128))
+                    bar_width = int(score * 1.5)
+                    cv2.rectangle(frame, (200, text_y-10), (200 + bar_width, text_y-5), conf_color, -1)
+                    cv2.putText(frame, f"{emotion.capitalize()}: {score:.1f}%", (10, text_y), font, 0.6, conf_color, 1, cv2.LINE_AA)
+                    text_y += 20
+                text_y += 20
+                cv2.putText(frame, f"Hand: {shared_data['hand_status']}", (10, text_y), font, 0.8, white_color, 2, cv2.LINE_AA)
+                text_y += 30
+                counter_color = green_color if shared_data['eye_turn_count'] > 0 else white_color
+                cv2.putText(frame, f"Eye Turns: {shared_data['eye_turn_count']}", (10, text_y), font, 0.8, counter_color, 2, cv2.LINE_AA)
+                text_y += 30
+                gaze_info = f"Gaze: {shared_data['current_gaze_direction'].upper()}"
+                cv2.putText(frame, gaze_info, (10, text_y), font, 0.8, cyan_color, 2, cv2.LINE_AA)
+
+            if VIDEO_WRITER is not None:
+                try:
+                    VIDEO_WRITER.write(frame)
+                except Exception:
+                    pass
+
+            processed += 1
+            if processed % log_every == 0:
+                log_summary(user_name)
+
+        print(f"✅ Fast analysis complete. Processed {processed} sampled frames.")
+    except Exception as e:
+        print(f"❌ Fast analysis error: {e}")
+    finally:
+        try:
+            cap.release()
+        except Exception:
+            pass
+        try:
+            if VIDEO_WRITER is not None:
+                VIDEO_WRITER.release()
+        except Exception:
+            pass
+        with data_lock:
+            shared_data['is_running'] = False
+
 
 def cleanup_and_exit(user_name):
     """Clean up resources and generate AI summary"""
@@ -1188,8 +1495,15 @@ if __name__ == '__main__':
     if not safe_name:
         print("❌ Failed to setup logging. Exiting...")
         sys.exit()
+
+    # Fast mode trigger via CLI or env (optional)
+    fast_flag = ('--fast' in sys.argv) or ('-F' in sys.argv) or (os.getenv('FAST_MODE', '').lower() in ('1', 'true', 'yes'))
+    if fast_flag:
+        fast_analyze_video(user_name, video_path)
+        cleanup_and_exit(user_name)
+        sys.exit(0)
     
-    # Start threads
+    # Start threads (normal realtime mode)
     try:
         # Initialize shared data
         with data_lock:
