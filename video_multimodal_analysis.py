@@ -13,6 +13,7 @@ import mediapipe as mp
 from tkinter import filedialog
 import tkinter as tk
 from openai import OpenAI
+import re
 
 # --- Global variables for communication between threads ---
 shared_data = {
@@ -69,7 +70,7 @@ USER_SCREENSHOT_FOLDER = None
 SESSION_TIMESTAMP = None
 
 # LLM Configuration - upgraded model and improved prompting via OpenRouter
-OPENROUTER_API_KEY = "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"
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 LLM_MODEL = "openai/gpt-4o"  # Upgraded from gpt-3.5-turbo for higher-quality, more creative output
 FALLBACK_LLM_MODEL = "anthropic/claude-3.5-sonnet"  # Optional fallback if the primary model is unavailable
 
@@ -96,8 +97,95 @@ def create_directories():
         return False
 
 
+def generate_offline_summary(log_text: str, user_name: str) -> str:
+    """Produce a concise 2–3 sentence summary without using an external LLM.
+    Heuristic: analyze primary emotions frequency, gaze direction balance, eye turns, and hand activity.
+    """
+    try:
+        lines = log_text.splitlines()
+        primary_emotions: list[str] = []
+        gaze_dirs: list[str] = []
+        hand_activity: list[str] = []
+        emotion_counts: dict[str, int] = {}
+        emotion_freq: dict[str, int] = {}
+        total_eye_turns = 0
+
+        # Extract key fields
+        for ln in lines:
+            if ln.startswith("Primary Emotion:"):
+                em = ln.split(":", 1)[1].strip()
+                em = em.replace(" (detecting...)", "").strip()
+                if em and em.lower() != "no face":
+                    primary_emotions.append(em)
+                    emotion_freq[em] = emotion_freq.get(em, 0) + 1
+            elif ln.startswith("Current Gaze Direction:"):
+                gd = ln.split(":", 1)[1].strip().lower()
+                if gd in {"left", "right", "center"}:
+                    gaze_dirs.append(gd)
+            elif ln.startswith("Hand Activity:"):
+                ha = ln.split(":", 1)[1].strip().lower()
+                if ha in {"active", "inactive"}:
+                    hand_activity.append(ha)
+            elif ln.lower().startswith("total eye turns detected:"):
+                try:
+                    total_eye_turns = int(re.findall(r"(\d+)", ln)[0])
+                except Exception:
+                    pass
+
+        # If final total wasn't captured, try last seen Eye Turn Count
+        if total_eye_turns == 0:
+            for ln in reversed(lines):
+                if ln.startswith("Eye Turn Count:"):
+                    try:
+                        total_eye_turns = int(re.findall(r"(\d+)", ln)[0])
+                        break
+                    except Exception:
+                        continue
+
+        # Determine top emotions
+        top_emotion = None
+        second_emotion = None
+        if emotion_freq:
+            sorted_em = sorted(emotion_freq.items(), key=lambda x: x[1], reverse=True)
+            top_emotion = sorted_em[0][0]
+            if len(sorted_em) > 1:
+                second_emotion = sorted_em[1][0]
+
+        distinct_emotions = len(emotion_freq)
+        stability = "stable" if distinct_emotions <= 2 else "variable"
+
+        # Gaze distribution
+        left_count = sum(1 for g in gaze_dirs if g == "left")
+        right_count = sum(1 for g in gaze_dirs if g == "right")
+        center_count = sum(1 for g in gaze_dirs if g == "center")
+        total_gaze = max(1, len(gaze_dirs))
+        dom_gaze = "center" if center_count >= max(left_count, right_count, center_count) else ("left" if left_count >= right_count else "right")
+
+        # Hand activity
+        active_count = sum(1 for h in hand_activity if h == "active")
+        inactive_count = sum(1 for h in hand_activity if h == "inactive")
+        total_hand = max(1, len(hand_activity))
+        hands_mostly = "mostly inactive" if inactive_count >= active_count else "mostly active"
+
+        # Build 2–3 sentence summary
+        emotion_clause = "neutral overall" if not top_emotion else (top_emotion if not second_emotion else f"{top_emotion}, with moments of {second_emotion}")
+        eye_clause = f"{total_eye_turns} sustained eye turns" if total_eye_turns > 0 else "few sustained eye turns"
+        gaze_clause = f"attention {dom_gaze}-leaning"
+
+        sentence_1 = f"Emotional tone appeared {stability} and {emotion_clause}."
+        sentence_2 = f"Gaze behavior showed {eye_clause} and {gaze_clause}, while hands were {hands_mostly}."
+        sentence_3 = "Overall demeanor suggested steady engagement with occasional shifts in affect." if stability == "stable" else "Overall impression was engaged yet dynamic, with noticeable but balanced shifts."
+
+        # Prefer 2 sentences unless variability is high
+        summary = f"{sentence_1} {sentence_2}" if distinct_emotions <= 2 else f"{sentence_1} {sentence_2} {sentence_3}"
+        return summary
+    except Exception:
+        # Ultra-safe minimal fallback
+        return f"Emotional tone was generally steady. Visual attention remained consistent with moderate eye movement; overall behavior suggested engaged participation."
+
+
 def generate_llm_summary(log_file_path, user_name):
-    """Generate a 2-3 line summary of the analysis using a stronger LLM"""
+    """Generate a 2-3 line summary of the analysis using a stronger LLM; fall back to offline heuristic if needed."""
     try:
         print(f"\n🤖 Generating AI summary for {user_name}...")
         
@@ -123,53 +211,67 @@ def generate_llm_summary(log_file_path, user_name):
         # Use the most recent portion of the log for relevance
         context_slice = log_content[-4000:]
         
-        # Initialize OpenAI client with OpenRouter
-        print("🔗 Connecting to AI service...")
-        client = OpenAI(
-            base_url="https://openrouter.ai/api/v1",
-            api_key=OPENROUTER_API_KEY,
-        )
-        
-        # Higher-quality, creative prompt with clear constraints
-        system_msg = (
-            "You are a senior behavioral analysis expert. Given structured logs of a video session, "
-            "write a crisp, human-sounding executive summary (2–3 short sentences). "
-            "Synthesize insights; do not restate raw numbers. Focus on primary emotions (patterns and shifts), "
-            "attention/eye behavior (turn direction, steadiness, timing), and overall behavioral impression. "
-            "Be professional, vivid, and constructive."
-        )
-        user_prompt = f"""Analyze this video behavioral analysis log and provide a brief 2–3 sentence professional summary.\n\nData for {user_name}:\n{context_slice}\n\nReturn only 2–3 short sentences, no lists or headings."""
-        
-        def call_model(model_name):
-            return client.chat.completions.create(
-                model=model_name,
-                messages=[
-                    {"role": "system", "content": system_msg},
-                    {"role": "user", "content": user_prompt}
-                ],
-                max_tokens=180,
-                temperature=0.8,
-                top_p=0.95,
-                presence_penalty=0.3,
-                frequency_penalty=0.1,
+        # If API key missing, skip remote call and do offline summary
+        if not OPENROUTER_API_KEY:
+            print("⚠️ OPENROUTER_API_KEY not set; generating offline summary.")
+            summary = generate_offline_summary(context_slice, user_name)
+            used_model = "offline-heuristic"
+        else:
+            # Initialize OpenAI client with OpenRouter
+            print("🔗 Connecting to AI service...")
+            client = OpenAI(
+                base_url="https://openrouter.ai/api/v1",
+                api_key=OPENROUTER_API_KEY,
             )
+            
+            # Higher-quality, creative prompt with clear constraints
+            system_msg = (
+                "You are a senior behavioral analysis expert. Given structured logs of a video session, "
+                "write a crisp, human-sounding executive summary (2–3 short sentences). "
+                "Synthesize insights; do not restate raw numbers. Focus on primary emotions (patterns and shifts), "
+                "attention/eye behavior (turn direction, steadiness, timing), and overall behavioral impression. "
+                "Be professional, vivid, and constructive."
+            )
+            user_prompt = f"""Analyze this video behavioral analysis log and provide a brief 2–3 sentence professional summary.\n\nData for {user_name}:\n{context_slice}\n\nReturn only 2–3 short sentences, no lists or headings."""
+            
+            def call_model(model_name):
+                return client.chat.completions.create(
+                    model=model_name,
+                    messages=[
+                        {"role": "system", "content": system_msg},
+                        {"role": "user", "content": user_prompt}
+                    ],
+                    max_tokens=180,
+                    temperature=0.8,
+                    top_p=0.95,
+                    presence_penalty=0.3,
+                    frequency_penalty=0.1,
+                )
+            
+            print("🤖 Sending request to AI service...")
+            try:
+                completion = call_model(LLM_MODEL)
+                used_model = LLM_MODEL
+                summary = completion.choices[0].message.content.strip() if completion else ""
+            except Exception as primary_err:
+                print(f"⚠️ Primary model failed ({LLM_MODEL}): {primary_err}")
+                try:
+                    print(f"🔁 Trying fallback model: {FALLBACK_LLM_MODEL}")
+                    completion = call_model(FALLBACK_LLM_MODEL)
+                    used_model = FALLBACK_LLM_MODEL
+                    summary = completion.choices[0].message.content.strip() if completion else ""
+                except Exception as fallback_err:
+                    print(f"❌ Fallback model failed: {fallback_err}")
+                    print("🛈 Falling back to offline heuristic summary.")
+                    summary = generate_offline_summary(context_slice, user_name)
+                    used_model = "offline-heuristic"
         
-        print("🤖 Sending request to AI service...")
-        try:
-            completion = call_model(LLM_MODEL)
-            used_model = LLM_MODEL
-        except Exception as primary_err:
-            print(f"⚠️ Primary model failed ({LLM_MODEL}): {primary_err}")
-            print(f"🔁 Trying fallback model: {FALLBACK_LLM_MODEL}")
-            completion = call_model(FALLBACK_LLM_MODEL)
-            used_model = FALLBACK_LLM_MODEL
-        
-        summary = completion.choices[0].message.content.strip() if completion else None
         if not summary:
-            print("❌ AI returned empty summary")
-            return None
+            print("❌ AI returned empty summary; using offline heuristic.")
+            summary = generate_offline_summary(context_slice, user_name)
+            used_model = "offline-heuristic"
         
-        print("✅ AI summary generated successfully!")
+        print("✅ Summary generated successfully!")
         
         # Save summary to separate file
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
