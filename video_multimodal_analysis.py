@@ -783,6 +783,14 @@ def video_display(user_name, video_path):
     """Main video display function with analyzed video recording"""
     global current_frame, VIDEO_WRITER, ANALYZED_VIDEO_PATH
     
+    # Initialize resizable display window (larger view)
+    window_name = 'Video Analysis with AI Summary'
+    try:
+        cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+    except Exception:
+        pass
+    display_window_resized = False
+    
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         print(f"❌ Cannot open video file: {video_path}")
@@ -839,6 +847,23 @@ def video_display(user_name, video_path):
             
             frame_count += 1
             frame_height, frame_width = frame.shape[:2]
+
+            # Enlarge display window once based on first frame aspect ratio
+            if not display_window_resized:
+                target_w = max(1280, frame_width)
+                target_h = int(target_w * frame_height / frame_width)
+                # Cap to 1920x1080 for safety
+                if target_w > 1920:
+                    target_w = 1920
+                    target_h = int(target_w * frame_height / frame_width)
+                if target_h > 1080:
+                    target_h = 1080
+                    target_w = int(target_h * frame_width / frame_height)
+                try:
+                    cv2.resizeWindow(window_name, int(target_w), int(target_h))
+                except Exception:
+                    pass
+                display_window_resized = True
             
             # Initialize video writer after first frame is available (for size)
             if not writer_initialized and ANALYZED_VIDEO_PATH is not None:
