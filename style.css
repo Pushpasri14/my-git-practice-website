@@ -1,4 +1,135 @@
-body {
-  background-color: #eef;
-  font-family: Arial, sans-serif;
+:root{
+  --bg-1:#0a0d12;
+  --bg-2:#0f1420;
+  --card:#111825cc;
+  --stroke:#2a3040;
+  --text:#e6ecff;
+  --muted:#a8b3cf;
+  --accent-1:#00ffd1;
+  --accent-2:#00b0ff;
+  --danger:#ff4d6d;
+  --glass:rgba(17,24,37,0.55);
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{
+  margin:0;
+  background:
+    radial-gradient(1200px 1200px at 85% 10%, rgba(0,176,255,0.10), transparent 55%),
+    radial-gradient(1000px 1000px at 10% 85%, rgba(0,255,209,0.12), transparent 55%),
+    linear-gradient(180deg,var(--bg-1),var(--bg-2));
+  color:var(--text);
+  font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+  line-height:1.5;
+}
+
+.site-header{
+  height:72px;
+  display:flex;align-items:center;justify-content:space-between;
+  padding:0 28px;
+  border-bottom:1px solid var(--stroke);
+  background:linear-gradient(180deg, rgba(17,24,37,0.9), rgba(17,24,37,0.6));
+  position:sticky;top:0;backdrop-filter: blur(8px) saturate(130%);
+  z-index:50;
+}
+.brand{display:flex;align-items:center;gap:10px;font-family: Orbitron, Inter, sans-serif}
+.logo{font-weight:800;font-size:20px;letter-spacing:0.5px}
+.logo-alt{font-weight:600;font-size:18px;color:var(--muted)}
+.logo-glow{
+  width:10px;height:10px;border-radius:50%;
+  background: radial-gradient(closest-side, var(--accent-1), transparent);
+  box-shadow: 0 0 24px var(--accent-1), 0 0 48px rgba(0,255,209,0.6);
+}
+.nav{display:flex;gap:18px}
+.nav-link{color:var(--muted);text-decoration:none}
+.nav-link:hover{color:var(--text)}
+
+.hero{
+  display:grid;grid-template-columns:1.1fr 1.4fr;gap:40px;align-items:center;
+  max-width:1200px;margin:40px auto;padding:0 24px;
+}
+.hero-content h1{font-size: clamp(36px, 5vw, 64px);margin:0 0 12px 0;line-height:1.05}
+.hero-content .accent{background: linear-gradient(90deg, var(--accent-1), var(--accent-2)); -webkit-background-clip:text; background-clip:text; color:transparent}
+.subtitle{color:var(--muted);font-size: clamp(16px, 1.9vw, 18px);max-width: 52ch}
+.cta-row{margin-top:18px;display:flex;gap:12px}
+.btn{display:inline-flex;align-items:center;gap:10px;padding:12px 18px;border-radius:12px;text-decoration:none;border:1px solid var(--stroke);color:var(--text);transition: all .2s ease}
+.btn.primary{background:linear-gradient(90deg, #0c2a2f, #0f263c);border-color: #134a54;box-shadow:inset 0 0 0 1px rgba(0,255,209,0.15)}
+.btn.primary:hover{box-shadow:0 0 24px rgba(0,255,209,0.15), inset 0 0 0 1px rgba(0,255,209,0.25)}
+.btn.secondary:hover{background:rgba(255,255,255,0.04)}
+
+.hero-visual{position:relative}
+.face-frame{
+  position:relative;overflow:hidden;border-radius:24px;
+  background:linear-gradient(180deg, #0c111b, #0b1421);
+  border:1px solid var(--stroke);
+  box-shadow:0 40px 120px rgba(0,0,0,0.35), 0 0 0 1px rgba(255,255,255,0.02) inset;
+  height: min(78vh, 760px);
+}
+.face-image{
+  position:absolute;inset:0;width:100%;height:100%;object-fit:cover;
+  filter: contrast(1.04) saturate(1.05) brightness(0.92);
+  transform: perspective(1200px) rotateY(-6deg) scale(1.02);
+  transform-origin: center right;
+}
+
+/* HUD overlay */
+.hud-overlay{position:absolute;inset:0;pointer-events:none}
+.grid{position:absolute;inset:0;opacity:0.18;
+  background-image:
+    linear-gradient(transparent 96%, rgba(0,255,209,0.3) 96%),
+    linear-gradient(90deg, transparent 96%, rgba(0,255,209,0.3) 96%);
+  background-size: 40px 40px;
+}
+.rings{position:absolute;inset:0;margin:auto;width:70%;height:70%;border-radius:50%;
+  background: radial-gradient(closest-side, rgba(0,255,209,0.08), transparent 60%),
+              radial-gradient(closest-side, rgba(0,176,255,0.08), transparent 62%);
+  animation: spin 14s linear infinite;
+}
+.scan-line{position:absolute;left:0;right:0;height:2px;background:linear-gradient(90deg, transparent, rgba(0,255,209,0.7), transparent);
+  animation: sweep 3.8s linear infinite; box-shadow:0 0 12px rgba(0,255,209,0.6)}
+.corner{position:absolute;width:42px;height:42px;border:2px solid rgba(0,255,209,0.6)}
+.corner.tl{top:14px;left:14px;border-right:none;border-bottom:none;border-radius:12px 0 0 0}
+.corner.tr{top:14px;right:14px;border-left:none;border-bottom:none;border-radius:0 12px 0 0}
+.corner.bl{bottom:14px;left:14px;border-right:none;border-top:none;border-radius:0 0 0 12px}
+.corner.br{bottom:14px;right:14px;border-left:none;border-top:none;border-radius:0 0 12px 0}
+
+/* Stats glass panel */
+.stats-panel{
+  position:absolute;right:16px;bottom:16px;left:auto;
+  background: var(--glass);
+  backdrop-filter: blur(10px) saturate(140%);
+  border:1px solid rgba(0,255,209,0.18);
+  border-radius:16px;padding:14px 16px;min-width:300px;max-width:min(46%, 420px);
+  box-shadow: 0 8px 40px rgba(0,0,0,0.35), inset 0 0 0 1px rgba(255,255,255,0.03);
+}
+.stats-header{display:flex;align-items:center;gap:10px;color:var(--muted);font-weight:600;margin-bottom:8px;font-size:13px}
+.stats-header .dot{width:8px;height:8px;border-radius:50%;background: var(--accent-1);box-shadow:0 0 16px rgba(0,255,209,0.8)}
+.stats-main{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-bottom:8px}
+.stat{padding:10px;border:1px solid rgba(255,255,255,0.06);border-radius:12px;background:rgba(255,255,255,0.03)}
+.stat .label{font-size:12px;color:var(--muted)}
+.stat .value{font-size:18px;font-weight:700;margin-top:4px}
+
+.bars{display:grid;gap:8px;margin-top:6px}
+.bar{display:grid;grid-template-columns:90px 1fr;align-items:center;gap:8px}
+.bar span{font-size:12px;color:var(--muted)}
+.bar-track{height:8px;background:rgba(255,255,255,0.06);border-radius:999px;overflow:hidden;border:1px solid rgba(255,255,255,0.05)}
+.bar-fill{height:100%;background: linear-gradient(90deg, var(--accent-1), var(--accent-2));box-shadow:0 0 16px rgba(0,255,209,0.35);width:0}
+
+.site-footer{
+  max-width:1200px;margin:40px auto; padding:16px 24px; display:flex; align-items:center; justify-content:space-between;
+  color:var(--muted); border-top:1px solid var(--stroke);
+}
+.tagline{color:var(--text)}
+
+@keyframes sweep{0%{top:-8%}100%{top:108%}}
+@keyframes spin{from{transform: rotate(0deg)}to{transform: rotate(360deg)}}
+
+/* Responsive */
+@media (max-width: 1100px){
+  .hero{grid-template-columns:1fr;gap:28px}
+  .stats-panel{left:16px;right:16px;max-width:unset}
+}
+@media (max-width: 640px){
+  .face-frame{height:min(70vh,640px)}
+  .bar{grid-template-columns:78px 1fr}
 }

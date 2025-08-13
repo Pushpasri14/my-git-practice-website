@@ -1,9 +1,42 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-  <title>About</title>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>About • Apex AI Scanner</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800&family=Orbitron:wght@500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <h2>This is the About page.</h2>
+  <header class="site-header">
+    <div class="brand">
+      <div class="logo-glow"></div>
+      <span class="logo">Apex</span>
+      <span class="logo-alt">AI Scanner</span>
+    </div>
+    <nav class="nav">
+      <a href="index.html#demo" class="nav-link">Demo</a>
+      <a href="about.html" class="nav-link">About</a>
+    </nav>
+  </header>
+
+  <main class="hero" style="grid-template-columns:1fr;max-width:900px">
+    <div class="hero-content">
+      <h1>About Apex AI Scanner</h1>
+      <p class="subtitle">A cinematic interface for multimodal perception. The demo showcases a 4K portrait with scanning HUD overlays and simulated metrics for primary emotions, gaze direction, and sustained eye turns. It’s designed as a front-end shell to connect with your Python video analysis pipeline.</p>
+      <p class="subtitle">To integrate with your backend later, expose an endpoint that streams analysis updates (emotion, gaze, eyeTurnCount), then replace the simulated updates in <code>app.js</code> with real-time data.</p>
+      <div class="cta-row">
+        <a href="index.html#demo" class="btn primary">Back to Demo</a>
+      </div>
+    </div>
+  </main>
+
+  <footer class="site-footer">
+    <span>© <span id="year"></span> Apex AI Scanner</span>
+    <span class="tagline">Precision Perception Interface</span>
+  </footer>
+  <script>document.getElementById('year').textContent = new Date().getFullYear();</script>
 </body>
 </html>
