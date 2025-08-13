@@ -16,6 +16,16 @@ from openai import OpenAI
 import re
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
+# Try optional GPU backends
+try:
+    import tensorflow as _tf
+except Exception:
+    _tf = None
+try:
+    import torch as _torch
+except Exception:
+    _torch = None
+
 # --- Global variables for communication between threads ---
 shared_data = {
     'dominant_emotion': "No Face",
@@ -81,10 +91,25 @@ FAST_RESIZE_MAX_WIDTH = int(os.getenv("FAST_RESIZE_MAX_WIDTH", "640"))
 FAST_GAZE_HOLD_SECONDS = float(os.getenv("FAST_GAZE_HOLD_SECONDS", "0.05"))  # shorter hold for fast counting
 FAST_WORKERS = int(os.getenv("FAST_WORKERS", max(1, (os.cpu_count() or 2) - 1)))
 
+# Batch analysis configuration (optional)
+BATCH_SIZE = int(os.getenv("BATCH_SIZE", "32"))
+BATCH_SAMPLE_EVERY = int(os.getenv("BATCH_SAMPLE_EVERY", "10"))  # analyze 1 frame every N frames
+DEEPFACE_BACKEND = os.getenv("DEEPFACE_BACKEND", "mediapipe")  # opencv|mediapipe|retinaface|mtcnn|ssd|dlib|yunet, etc.
+USE_OPENCL = os.getenv("USE_OPENCL", "1").lower() in ("1", "true", "yes")
+USE_GPU = os.getenv("USE_GPU", "auto").lower()  # auto|1|true|yes|0|false|no
+
 
 def create_directories():
     """Create necessary directories if they don't exist"""
     try:
+        # Enable OpenCV acceleration where possible
+        try:
+            cv2.setUseOptimized(True)
+            if USE_OPENCL and hasattr(cv2, 'ocl'):
+                cv2.ocl.setUseOpenCL(True)
+        except Exception:
+            pass
+        
         # Create main folders
         os.makedirs(LOG_FOLDER, exist_ok=True)
         os.makedirs(SCREENSHOT_FOLDER, exist_ok=True)
@@ -102,6 +127,43 @@ def create_directories():
     except Exception as e:
         print(f"❌ Error creating directories: {e}")
         return False
+
+
+def configure_acceleration():
+    """Configure GPU acceleration for TensorFlow/PyTorch and OpenCV threading."""
+    # OpenCV threads
+    try:
+        cv2.setNumThreads(max(1, (os.cpu_count() or 2) - 1))
+    except Exception:
+        pass
+
+    # TensorFlow GPU setup
+    try:
+        if _tf is not None:
+            gpus = _tf.config.list_physical_devices('GPU')
+            gpu_available = len(gpus) > 0
+            if (USE_GPU in ("auto", "1", "true", "yes")) and gpu_available:
+                for gpu in gpus:
+                    try:
+                        _tf.config.experimental.set_memory_growth(gpu, True)
+                    except Exception:
+                        pass
+                print(f"🟢 TensorFlow GPU detected: {len(gpus)} device(s); memory growth enabled")
+            else:
+                _tf.config.set_visible_devices([], 'GPU')
+                print("🟡 GPU disabled for TensorFlow (no GPU or USE_GPU=0)")
+    except Exception as e:
+        print(f"⚠️ TensorFlow GPU setup warning: {e}")
+
+    # PyTorch GPU setup
+    try:
+        if _torch is not None:
+            if _torch.cuda.is_available() and (USE_GPU in ("auto", "1", "true", "yes")):
+                print(f"🟢 PyTorch CUDA available: { _torch.cuda.device_count() } device(s)")
+            else:
+                print("🟡 PyTorch CUDA not available or disabled")
+    except Exception:
+        pass
 
 
 def generate_offline_summary(log_text: str, user_name: str) -> str:
@@ -1702,12 +1764,192 @@ def cleanup_and_exit(user_name):
         print("❌ No log file found for AI summary generation")
 
 
+# --- BATCH ANALYSIS MODE (DeepFace batch inference) ---
+
+def batch_analyze_video(user_name: str, video_path: str):
+    """Batch process frames with DeepFace to leverage vectorized GPU/CPU execution.
+    - Samples every Nth frame (BATCH_SAMPLE_EVERY)
+    - Sends frames in batches (BATCH_SIZE) to DeepFace.analyze
+    - Overlays and writes a condensed analyzed video quickly
+    """
+    global VIDEO_WRITER, ANALYZED_VIDEO_PATH
+    print(f"🧪 Batch analysis mode: batch_size={BATCH_SIZE}, sample_every={BATCH_SAMPLE_EVERY}, backend={DEEPFACE_BACKEND}")
+
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        print(f"❌ Cannot open video file: {video_path}")
+        return
+
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    if not fps or fps <= 0:
+        fps = 25.0
+    duration = total_frames / fps if fps > 0 else 0
+
+    # Collect sampled frames
+    sampled_indices = list(range(0, total_frames, max(1, BATCH_SAMPLE_EVERY)))
+    if not sampled_indices:
+        print("❌ No frames to process in batch mode")
+        cap.release()
+        return
+
+    # Prime writer
+    cap.set(cv2.CAP_PROP_POS_FRAMES, int(sampled_indices[0]))
+    ok, first = cap.read()
+    if not ok:
+        print("❌ Unable to read first frame for batch analysis")
+        cap.release()
+        return
+    fh, fw = first.shape[:2]
+    try:
+        fourcc = cv2.VideoWriter_fourcc(*VIDEO_CODEC)
+        VIDEO_WRITER = cv2.VideoWriter(ANALYZED_VIDEO_PATH, fourcc, max(15.0, min(30.0, fps)), (fw, fh))
+        print(f"🎥 Writing batch analyzed video to: {os.path.abspath(ANALYZED_VIDEO_PATH)}")
+    except Exception as e:
+        print(f"⚠️ Could not initialize video writer: {e}")
+        VIDEO_WRITER = None
+
+    # Utility: process one batch
+    def process_batch(batch_frames, batch_idxs):
+        nonlocal fps, duration
+        try:
+            # DeepFace batch (convert BGR to RGB for consistency)
+            imgs_rgb = [cv2.cvtColor(fr, cv2.COLOR_BGR2RGB) for fr in batch_frames]
+            results = DeepFace.analyze(
+                img_path=imgs_rgb,
+                actions=['emotion'],
+                enforce_detection=False,
+                detector_backend=DEEPFACE_BACKEND,
+                silent=True
+            )
+            if isinstance(results, dict):
+                results = [results]
+        except Exception as e:
+            print(f"⚠️ DeepFace batch failed: {e}")
+            results = [None] * len(batch_frames)
+
+        # For each frame, add overlays and write
+        for fr, idx, res in zip(batch_frames, batch_idxs, results):
+            ts = (idx / fps) if fps > 0 else 0.0
+            with data_lock:
+                shared_data['video_timestamp'] = ts
+                if res:
+                    raw_emotions = res.get('emotion', {})
+                    shared_data['emotions'] = raw_emotions
+                    if raw_emotions:
+                        shared_data['dominant_emotion'] = max(raw_emotions, key=raw_emotions.get)
+                    else:
+                        shared_data['dominant_emotion'] = 'No Face'
+                else:
+                    shared_data['emotions'] = {}
+                    shared_data['dominant_emotion'] = 'No Face'
+
+            # Minimal MediaPipe per-frame for hands and gaze (still lighter than full-rate)
+            frame_rgb = cv2.cvtColor(fr, cv2.COLOR_BGR2RGB)
+            try:
+                mp_hands = mp.solutions.hands
+                hands = mp_hands.Hands(static_image_mode=True, max_num_hands=2, min_detection_confidence=0.6, min_tracking_confidence=0.6)
+                hand_results = hands.process(frame_rgb)
+            except Exception:
+                hand_results = None
+            with data_lock:
+                if hand_results and hand_results.multi_hand_landmarks:
+                    shared_data['hand_status'] = 'Active'
+                else:
+                    shared_data['hand_status'] = 'Inactive'
+
+            try:
+                mp_face_mesh = mp.solutions.face_mesh
+                face_mesh = mp_face_mesh.FaceMesh(static_image_mode=True, max_num_faces=1, refine_landmarks=False, min_detection_confidence=0.6, min_tracking_confidence=0.6)
+                face_results = face_mesh.process(frame_rgb)
+                if face_results.multi_face_landmarks:
+                    face_landmarks = face_results.multi_face_landmarks[0]
+                    left_iris_center = get_iris_center(face_landmarks, LEFT_IRIS, fw, fh)
+                    right_iris_center = get_iris_center(face_landmarks, RIGHT_IRIS, fw, fh)
+                    left_eye_center = get_eye_center(face_landmarks, LEFT_EYE, fw, fh)
+                    right_eye_center = get_eye_center(face_landmarks, RIGHT_EYE, fw, fh)
+                    left_ratio = calculate_gaze_ratio(left_iris_center, left_eye_center)
+                    right_ratio = calculate_gaze_ratio(right_iris_center, right_eye_center)
+                    combined = (left_ratio + right_ratio) / 2
+                    with data_lock:
+                        shared_data['left_iris_x'] = left_ratio
+                        shared_data['right_iris_x'] = right_ratio
+                        shared_data['combined_ratio'] = combined
+                        if combined < 0.40:
+                            shared_data['current_gaze_direction'] = 'left'
+                        elif combined > 0.65:
+                            shared_data['current_gaze_direction'] = 'right'
+                        else:
+                            shared_data['current_gaze_direction'] = 'center'
+                else:
+                    with data_lock:
+                        shared_data['current_gaze_direction'] = 'center'
+            except Exception:
+                with data_lock:
+                    shared_data['current_gaze_direction'] = 'center'
+
+            # Draw overlay (reusing existing style minimal)
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            cyan = (255, 255, 0)
+            white = (255, 255, 255)
+            y = 30
+            cv2.putText(fr, f"Video: {os.path.basename(video_path)}", (10, y), font, 0.6, cyan, 1, cv2.LINE_AA); y += 25
+            cv2.putText(fr, f"Time: {format_video_time(ts)} / {format_video_time(duration)}", (10, y), font, 0.6, cyan, 1, cv2.LINE_AA); y += 35
+            cv2.putText(fr, f"Emotion: {shared_data['dominant_emotion']}", (10, y), font, 0.8, white, 2, cv2.LINE_AA); y += 30
+            cv2.putText(fr, f"Gaze: {shared_data['current_gaze_direction'].upper()}  L:{shared_data['left_iris_x']:.2f} R:{shared_data['right_iris_x']:.2f}", (10, y), font, 0.6, cyan, 1, cv2.LINE_AA); y += 25
+            cv2.putText(fr, f"Hand: {shared_data['hand_status']}", (10, y), font, 0.8, white, 2, cv2.LINE_AA)
+
+            # Write out
+            if VIDEO_WRITER is not None:
+                try:
+                    VIDEO_WRITER.write(fr)
+                except Exception:
+                    pass
+
+            # Periodic log
+            log_summary(user_name)
+
+    # Iterate over sampled frames in batches
+    frames_buf, idxs_buf = [], []
+    try:
+        for i, idx in enumerate(sampled_indices):
+            cap.set(cv2.CAP_PROP_POS_FRAMES, int(idx))
+            ret, fr = cap.read()
+            if not ret:
+                continue
+            frames_buf.append(fr)
+            idxs_buf.append(idx)
+            if len(frames_buf) >= BATCH_SIZE:
+                process_batch(frames_buf, idxs_buf)
+                frames_buf, idxs_buf = [], []
+        if frames_buf:
+            process_batch(frames_buf, idxs_buf)
+        print(f"✅ Batch analysis complete. Processed {len(sampled_indices)} frames in batches of {BATCH_SIZE}.")
+    except Exception as e:
+        print(f"❌ Batch analysis error: {e}")
+    finally:
+        try:
+            cap.release()
+        except Exception:
+            pass
+        try:
+            if VIDEO_WRITER is not None:
+                VIDEO_WRITER.release()
+        except Exception:
+            pass
+        with data_lock:
+            shared_data['is_running'] = False
+
+
 if __name__ == '__main__':
     print("🎯 VIDEO MULTIMODAL ANALYSIS WITH AI SUMMARY")
     print("=" * 60)
     print("🤖 AI-powered behavioral summary using a higher-quality model")
     print("📊 Professional behavioral analysis at session end!")
-    
+
+    # Configure acceleration (GPU/OpenCL/Threads)
+    configure_acceleration()
+
     user_name = None
     while user_name is None:
         try:
@@ -1751,8 +1993,13 @@ if __name__ == '__main__':
     # Fast mode trigger via CLI or env (optional)
     fast_flag = ('--fast' in sys.argv) or ('-F' in sys.argv) or (os.getenv('FAST_MODE', '').lower() in ('1', 'true', 'yes'))
     ultra_flag = ('--ultrafast' in sys.argv) or (os.getenv('FAST_MODE', '').lower() in ('ultra', 'ultrafast'))
+    batch_flag = ('--batch' in sys.argv) or (os.getenv('BATCH_MODE', '').lower() in ('1', 'true', 'yes'))
     if ultra_flag:
         ultra_fast_analyze_video(user_name, video_path)
+        cleanup_and_exit(user_name)
+        sys.exit(0)
+    if batch_flag:
+        batch_analyze_video(user_name, video_path)
         cleanup_and_exit(user_name)
         sys.exit(0)
     if fast_flag:
