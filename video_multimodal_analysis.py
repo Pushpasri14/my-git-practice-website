@@ -14,6 +14,7 @@ from tkinter import filedialog
 import tkinter as tk
 from openai import OpenAI
 import re
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 # --- Global variables for communication between threads ---
 shared_data = {
@@ -78,6 +79,7 @@ FALLBACK_LLM_MODEL = "anthropic/claude-3.5-sonnet"  # Optional fallback if the p
 FAST_MAX_FRAMES = int(os.getenv("FAST_MAX_FRAMES", "200"))  # total frames sampled across the entire video
 FAST_RESIZE_MAX_WIDTH = int(os.getenv("FAST_RESIZE_MAX_WIDTH", "640"))
 FAST_GAZE_HOLD_SECONDS = float(os.getenv("FAST_GAZE_HOLD_SECONDS", "0.05"))  # shorter hold for fast counting
+FAST_WORKERS = int(os.getenv("FAST_WORKERS", max(1, (os.cpu_count() or 2) - 1)))
 
 
 def create_directories():
@@ -1388,6 +1390,256 @@ def fast_analyze_video(user_name: str, video_path: str):
         with data_lock:
             shared_data['is_running'] = False
 
+# --- ULTRA FAST PARALLEL MODE (optional) ---
+
+def _ultra_worker_pack(frame_bgr, fps, frame_idx, video_path, duration, max_width):
+    """Worker-side processing for a single frame. Returns an overlayed JPEG bytes and summary dict."""
+    try:
+        # Local imports to keep worker lightweight
+        import cv2 as _cv
+        import numpy as _np
+        import time as _time
+        import mediapipe as _mp
+        from deepface import DeepFace as _DeepFace
+
+        # Optional resize
+        fh, fw = frame_bgr.shape[:2]
+        scale = 1.0
+        if fw > max_width:
+            scale = max_width / float(fw)
+            frame_proc = _cv.resize(frame_bgr, (int(fw * scale), int(fh * scale)))
+        else:
+            frame_proc = frame_bgr
+
+        # Init detectors
+        mp_hands = _mp.solutions.hands
+        hands = mp_hands.Hands(static_image_mode=True, max_num_hands=2, min_detection_confidence=0.6, min_tracking_confidence=0.6)
+        mp_face_mesh = _mp.solutions.face_mesh
+        face_mesh = mp_face_mesh.FaceMesh(static_image_mode=True, max_num_faces=1, refine_landmarks=False, min_detection_confidence=0.6, min_tracking_confidence=0.6)
+        mp_drawing = _mp.solutions.drawing_utils
+
+        # Emotion
+        dominant_emotion = "No Face"
+        emotions = {}
+        face_region = None
+        try:
+            preds = _DeepFace.analyze(img_path=frame_proc, actions=['emotion'], enforce_detection=False, detector_backend='mediapipe', silent=True)
+            if preds and len(preds) > 0:
+                emotions = preds[0]['emotion']
+                region = preds[0]['region']
+                if region is not None:
+                    if scale != 1.0:
+                        face_region = {
+                            'x': int(region['x'] / scale),
+                            'y': int(region['y'] / scale),
+                            'w': int(region['w'] / scale),
+                            'h': int(region['h'] / scale),
+                        }
+                    else:
+                        face_region = region
+                # Pick dominant
+                if emotions:
+                    dominant_emotion = max(emotions, key=emotions.get)
+        except Exception:
+            pass
+
+        # Hand detection
+        frame_rgb = _cv.cvtColor(frame_bgr, _cv.COLOR_BGR2RGB)
+        hand_results = hands.process(frame_rgb)
+        hand_status = "Active" if hand_results and hand_results.multi_hand_landmarks else "Inactive"
+
+        # Eye tracking
+        gaze_direction = "center"
+        left_ratio = 0.5
+        right_ratio = 0.5
+        combined_ratio = 0.5
+        face_results = face_mesh.process(frame_rgb)
+        if face_results.multi_face_landmarks:
+            face_landmarks = face_results.multi_face_landmarks[0]
+            # Reuse simple center computations
+            LEFT_IRIS = [469, 470, 471, 472]
+            RIGHT_IRIS = [474, 475, 476, 477]
+            LEFT_EYE = [33, 7, 163, 144, 145, 153, 154, 155, 133, 173, 157, 158, 159, 160, 161, 246]
+            RIGHT_EYE = [362, 382, 381, 380, 374, 373, 390, 249, 263, 466, 388, 387, 386, 385, 384, 398]
+
+            def _center(lms, idxs, w, h):
+                pts = []
+                for i in idxs:
+                    if i < len(lms.landmark):
+                        pts.append((_np.clip(lms.landmark[i].x, 0, 1) * w, _np.clip(lms.landmark[i].y, 0, 1) * h))
+                if len(pts) < 4:
+                    return None
+                pts = _np.array(pts)
+                return pts.mean(axis=0)
+
+            fh, fw = frame_bgr.shape[:2]
+            l_ic = _center(face_landmarks, LEFT_IRIS, fw, fh)
+            r_ic = _center(face_landmarks, RIGHT_IRIS, fw, fh)
+            l_ec = _center(face_landmarks, LEFT_EYE, fw, fh)
+            r_ec = _center(face_landmarks, RIGHT_EYE, fw, fh)
+
+            def _gr(iris, eye):
+                if iris is None or eye is None:
+                    return 0.5
+                disp = (iris[0] - eye[0]) / 25.0
+                return max(0.0, min(1.0, 0.5 + disp))
+
+            left_ratio = _gr(l_ic, l_ec)
+            right_ratio = _gr(r_ic, r_ec)
+            combined_ratio = (left_ratio + right_ratio) / 2.0
+            if combined_ratio < 0.40:
+                gaze_direction = "left"
+            elif combined_ratio > 0.65:
+                gaze_direction = "right"
+            else:
+                gaze_direction = "center"
+
+        # Draw overlays
+        font = _cv.FONT_HERSHEY_SIMPLEX
+        white = (255, 255, 255)
+        cyan = (255, 255, 0)
+        green = (0, 255, 0)
+        yellow = (0, 255, 255)
+        frame_out = frame_bgr.copy()
+
+        # Face box
+        if face_region:
+            _cv.rectangle(frame_out, (face_region['x'], face_region['y']), (face_region['x'] + face_region['w'], face_region['y'] + face_region['h']), (255, 0, 0), 2)
+
+        # Hands
+        if hand_results and hand_results.multi_hand_landmarks:
+            for hl in hand_results.multi_hand_landmarks:
+                mp_drawing.draw_landmarks(frame_out, hl, mp_hands.HAND_CONNECTIONS,
+                                          mp_drawing.DrawingSpec(color=(0, 255, 0), thickness=2, circle_radius=4),
+                                          mp_drawing.DrawingSpec(color=(0, 0, 255), thickness=2, circle_radius=2))
+
+        # Text
+        vt = f"Time: {int((frame_idx / fps)//60):02d}:{int((frame_idx / fps)%60):02d} / {int(duration//60):02d}:{int(duration%60):02d}"
+        y = 30
+        _cv.putText(frame_out, f"Video: {os.path.basename(video_path)}", (10, y), font, 0.6, cyan, 1, _cv.LINE_AA); y += 25
+        _cv.putText(frame_out, vt, (10, y), font, 0.6, cyan, 1, _cv.LINE_AA); y += 35
+        emo_color = white if dominant_emotion not in ("No Face",) else (128, 128, 128)
+        _cv.putText(frame_out, f"Emotion: {dominant_emotion}", (10, y), font, 0.8, emo_color, 2, _cv.LINE_AA); y += 30
+        _cv.putText(frame_out, f"Gaze: {gaze_direction.upper()}  L:{left_ratio:.2f} R:{right_ratio:.2f}", (10, y), font, 0.6, cyan, 1, _cv.LINE_AA); y += 25
+        _cv.putText(frame_out, f"Hand: {hand_status}", (10, y), font, 0.8, white, 2, _cv.LINE_AA)
+
+        # Encode overlay as JPEG
+        ok, enc = _cv.imencode('.jpg', frame_out, [int(_cv.IMWRITE_JPEG_QUALITY), 80])
+        jpeg = enc.tobytes() if ok else None
+
+        return {
+            'idx': int(frame_idx),
+            'dominant_emotion': dominant_emotion,
+            'emotions': emotions,
+            'hand_status': hand_status,
+            'gaze_direction': gaze_direction,
+            'left_ratio': float(left_ratio),
+            'right_ratio': float(right_ratio),
+            'combined_ratio': float(combined_ratio),
+            'jpeg': jpeg,
+        }
+    except Exception as e:
+        return {'idx': int(frame_idx), 'error': str(e), 'jpeg': None}
+
+
+def ultra_fast_analyze_video(user_name: str, video_path: str):
+    """Ultra-fast parallel sampling using multiple CPU workers. Produces a short analyzed video from samples."""
+    global VIDEO_WRITER, ANALYZED_VIDEO_PATH
+    print(f"🚀 Ultra-fast analysis mode: {FAST_WORKERS} workers, up to {FAST_MAX_FRAMES} frames")
+
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        print(f"❌ Cannot open video file: {video_path}")
+        return
+
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    if not fps or fps <= 0:
+        fps = 25.0
+    duration = total_frames / fps if fps > 0 else 0
+
+    # Determine frames to sample
+    num_samples = min(FAST_MAX_FRAMES, total_frames) if total_frames > 0 else 0
+    if num_samples <= 0:
+        print("❌ No frames to process.")
+        cap.release()
+        return
+    frame_indices = np.linspace(0, max(0, total_frames - 1), num_samples, dtype=int)
+
+    # Read first frame to initialize writer
+    cap.set(cv2.CAP_PROP_POS_FRAMES, int(frame_indices[0]))
+    ok, first_frame = cap.read()
+    if not ok:
+        print("❌ Unable to read first frame for ultra-fast analysis.")
+        cap.release()
+        return
+    fh, fw = first_frame.shape[:2]
+
+    # Initialize video writer for output montage
+    try:
+        fourcc = cv2.VideoWriter_fourcc(*VIDEO_CODEC)
+        VIDEO_WRITER = cv2.VideoWriter(ANALYZED_VIDEO_PATH, fourcc, max(15.0, min(30.0, fps)), (fw, fh))
+        print(f"🎥 Writing ultra-fast analyzed video to: {os.path.abspath(ANALYZED_VIDEO_PATH)}")
+    except Exception as e:
+        print(f"⚠️ Could not initialize video writer: {e}")
+        VIDEO_WRITER = None
+
+    # Collect frames in memory (as BGR) for workers to avoid re-opening video
+    frames_pack = []
+    for idx in frame_indices:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, int(idx))
+        ret, fr = cap.read()
+        if ret:
+            frames_pack.append((fr, idx))
+    cap.release()
+
+    # Process in parallel
+    results = []
+    start = time.time()
+    try:
+        with ProcessPoolExecutor(max_workers=FAST_WORKERS) as ex:
+            futs = [ex.submit(_ultra_worker_pack, fr, fps, int(idx), video_path, duration, FAST_RESIZE_MAX_WIDTH) for fr, idx in frames_pack]
+            for fut in as_completed(futs):
+                try:
+                    results.append(fut.result())
+                except Exception as e:
+                    results.append({'error': str(e)})
+    except Exception as e:
+        print(f"❌ Parallel execution failed: {e}")
+        return
+
+    # Sort by original frame index
+    results = [r for r in results if r is not None]
+    results.sort(key=lambda r: r.get('idx', 0))
+
+    # Write video and log summaries
+    for r in results:
+        ts = (r.get('idx', 0) / fps) if fps > 0 else 0.0
+        with data_lock:
+            shared_data['video_timestamp'] = ts
+            shared_data['dominant_emotion'] = r.get('dominant_emotion', 'No Face')
+            shared_data['emotions'] = r.get('emotions', {})
+            shared_data['hand_status'] = r.get('hand_status', 'Inactive')
+            shared_data['current_gaze_direction'] = r.get('gaze_direction', 'center')
+            shared_data['left_iris_x'] = r.get('left_ratio', 0.5)
+            shared_data['right_iris_x'] = r.get('right_ratio', 0.5)
+            shared_data['combined_ratio'] = r.get('combined_ratio', 0.5)
+        # periodic logging
+        log_summary(user_name)
+        # write frame
+        if VIDEO_WRITER is not None and r.get('jpeg'):
+            try:
+                arr = np.frombuffer(r['jpeg'], dtype=np.uint8)
+                frame_overlay = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+                VIDEO_WRITER.write(frame_overlay)
+            except Exception:
+                pass
+
+    if VIDEO_WRITER is not None:
+        VIDEO_WRITER.release()
+    took = time.time() - start
+    print(f"✅ Ultra-fast analysis complete in {took:.2f}s for {len(results)} frames.")
+
 
 def cleanup_and_exit(user_name):
     """Clean up resources and generate AI summary"""
@@ -1498,11 +1750,16 @@ if __name__ == '__main__':
 
     # Fast mode trigger via CLI or env (optional)
     fast_flag = ('--fast' in sys.argv) or ('-F' in sys.argv) or (os.getenv('FAST_MODE', '').lower() in ('1', 'true', 'yes'))
+    ultra_flag = ('--ultrafast' in sys.argv) or (os.getenv('FAST_MODE', '').lower() in ('ultra', 'ultrafast'))
+    if ultra_flag:
+        ultra_fast_analyze_video(user_name, video_path)
+        cleanup_and_exit(user_name)
+        sys.exit(0)
     if fast_flag:
         fast_analyze_video(user_name, video_path)
         cleanup_and_exit(user_name)
         sys.exit(0)
-    
+
     # Start threads (normal realtime mode)
     try:
         # Initialize shared data
