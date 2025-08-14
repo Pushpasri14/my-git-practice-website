@@ -1,0 +1,7 @@
+numpy>=1.23.5
+opencv-python>=4.8.0
+mediapipe>=0.10.9
+# Optional packages below. The script runs without them and falls back to heuristics.
+# deepface>=0.0.91
+# tensorflow==2.15.0
+# openai>=1.37.0
