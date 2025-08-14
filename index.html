@@ -7,5 +7,32 @@
 <body>
   <h1>Hello pushpa this is kiran!</h1>
   <h2>This is KPSB</h2>
+
+  <input type="file" id="videoInput" accept="video/*">
+  <button onclick="uploadAndAnalyze()">Upload & Analyze</button>
+  <pre id="result"></pre>
+
+  <script>
+    async function uploadAndAnalyze() {
+      const input = document.getElementById('videoInput');
+      if (!input.files || !input.files[0]) {
+        alert('Please select a video file first.');
+        return;
+      }
+      const form = new FormData();
+      form.append('file', input.files[0]);
+      try {
+        const res = await fetch('http://127.0.0.1:8000/api/analyze', { method: 'POST', body: form });
+        if (!res.ok) {
+          const text = await res.text();
+          throw new Error(text || 'Request failed');
+        }
+        const data = await res.json();
+        document.getElementById('result').textContent = JSON.stringify(data, null, 2);
+      } catch (err) {
+        document.getElementById('result').textContent = 'Error: ' + err.message;
+      }
+    }
+  </script>
 </body>
 </html>
