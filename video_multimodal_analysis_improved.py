@@ -1109,21 +1109,34 @@ if __name__ == '__main__':
     print("=" * 60)
     print("🤖 AI-powered behavioral summary with face-gated emotion analysis")
     print("📊 More robust smile/laughter detection and smoothing\n")
-    user_name = None
-    while user_name is None:
-        try:
-            user_input = input("👤 Please enter your name: ").strip()
-            if user_input:
-                user_name = user_input
-                print(f"✅ Hello {user_name}! Starting video analysis...")
-            else:
-                print("❌ Please enter a valid name.")
-        except KeyboardInterrupt:
-            print("\n👋 Goodbye!")
-            sys.exit()
+    user_name = "User"
     video_path = None
     try:
-        video_path = select_video_file()
+        # Directly open file dialog (if available), otherwise single manual prompt
+        if _tk_available:
+            try:
+                root = tk.Tk()
+                root.lift()
+                root.attributes('-topmost', True)
+                root.withdraw()
+                video_path = filedialog.askopenfilename(
+                    title="Select Video File",
+                    filetypes=[
+                        ("Video files", "*.mp4 *.avi *.mov *.mkv *.wmv *.flv *.webm"),
+                        ("MP4 files", "*.mp4"),
+                        ("AVI files", "*.avi"),
+                        ("MOV files", "*.mov"),
+                        ("All files", "*.*")
+                    ]
+                )
+                root.destroy()
+            except Exception:
+                video_path = None
+        if not video_path:
+            # fallback to one-time manual input without menu
+            print("📝 Enter full path to your video file (e.g., /path/to/video.mp4):")
+            p = input().strip().strip('"').strip("'")
+            video_path = p
     except Exception as e:
         print(f"❌ Video selection failed: {e}")
         sys.exit()
