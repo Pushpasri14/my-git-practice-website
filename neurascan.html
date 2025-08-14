@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NeuraScan AI - Video Analysis</title>
+    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Exo+2:wght@300;400;700;900&family=Rajdhani:wght@300;400;600;700&display=swap" rel="stylesheet">
+    <style>
+        * { box-sizing: border-box; }
+        body { margin: 0; font-family: 'Exo 2', Arial, sans-serif; background: #0b0f16; color: #e8f1ff; }
+        header { position: sticky; top: 0; padding: 16px 24px; background: rgba(0,0,0,0.6); backdrop-filter: blur(8px); display: flex; align-items: center; justify-content: space-between; z-index: 10; }
+        .logo { font-family: 'Orbitron', sans-serif; letter-spacing: 2px; font-weight: 900; font-size: 22px; color: #00ccff; }
+        main { padding: 24px; max-width: 1200px; margin: 0 auto; }
+        .row { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+        .card { background: #111a26; border: 1px solid #153043; border-radius: 14px; padding: 18px; }
+        .card h2 { margin: 0 0 12px; font-size: 18px; color: #8bd9ff; }
+        .controls { display: flex; gap: 12px; align-items: center; margin-bottom: 16px; }
+        .btn { padding: 10px 16px; background: #00ccff; color: #08111a; border: 0; border-radius: 8px; cursor: pointer; font-weight: 700; }
+        .btn:disabled { opacity: 0.6; cursor: not-allowed; }
+        .stat { display: grid; grid-template-columns: 180px 1fr; padding: 6px 0; border-bottom: 1px dashed #153043; }
+        .stat:last-child { border-bottom: 0; }
+        .badges { display: flex; flex-wrap: wrap; gap: 8px; }
+        .emotion-badge { padding: 6px 10px; border-radius: 100px; background: #0e2433; border: 1px solid #1a4b66; font-weight: 700; font-size: 12px; }
+        .emotion-badge.happy { background: #194d2b; border-color: #2f9e44; color: #e6fff0; }
+        .emotion-badge.sad { background: #163b62; border-color: #228be6; }
+        .emotion-badge.angry { background: #401a1a; border-color: #fa5252; }
+        .emotion-badge.neutral { background: #2b2b2b; border-color: #adb5bd; }
+        .emotion-badge.surprised { background: #5a3a16; border-color: #f59f00; }
+        .snapshot { background: #0f1924; border: 1px solid #14354a; border-radius: 12px; padding: 12px; margin-bottom: 12px; }
+        .snapshot .title { font-weight: 700; margin-bottom: 8px; color: #9be1ff; }
+        .snapshot .meta { font-size: 12px; opacity: 0.9; margin-bottom: 6px; }
+        .snapshot-canvas { width: 100%; max-width: 420px; border-radius: 8px; display: block; background: #0b0f16; border: 1px solid #1a4b66; }
+        .loading { display: none; align-items: center; gap: 12px; padding: 12px; color: #9be1ff; }
+        .spinner { width: 20px; height: 20px; border: 3px solid rgba(0, 204, 255, 0.3); border-top: 3px solid #00ccff; border-radius: 50%; animation: spin 1s linear infinite; }
+        @keyframes spin { 100% { transform: rotate(360deg);} }
+        @media (max-width: 900px) { .row { grid-template-columns: 1fr; } }
+    </style>
+</head>
+<body>
+    <header>
+        <div class="logo">NeuraScan AI</div>
+        <div class="controls">
+            <input type="file" id="videoInput" accept="video/*">
+            <button class="btn" id="analyzeBtn">Upload & Analyze</button>
+        </div>
+    </header>
+
+    <main>
+        <div id="loading" class="loading">
+            <div class="spinner"></div>
+            <div>Analyzing video...</div>
+        </div>
+
+        <div class="row">
+            <div class="card">
+                <h2>Video</h2>
+                <video id="videoPlayer" controls style="width:100%; border-radius: 12px; background:#000;">
+                    Your browser does not support the video tag.
+                </video>
+            </div>
+            <div class="card">
+                <h2>Summary</h2>
+                <div class="stat"><div>Total Duration</div><div id="videoDuration">--</div></div>
+                <div class="stat"><div>Motion Events</div><div id="motionEvents">--</div></div>
+                <div class="stat"><div>Gesture Activities</div><div id="gestureCount">--</div></div>
+                <div class="stat"><div>Dominant Emotion</div><div id="dominantEmotion">--</div></div>
+            </div>
+        </div>
+
+        <div class="row" style="margin-top: 24px;">
+            <div class="card">
+                <h2>Emotional Analysis</h2>
+                <div id="emotionAnalysis" class="badges"></div>
+            </div>
+            <div class="card">
+                <h2>Motion & Head Tracking</h2>
+                <div id="motionTracking"></div>
+            </div>
+        </div>
+
+        <div class="row" style="margin-top: 24px;">
+            <div class="card">
+                <h2>Hand Gesture Analysis</h2>
+                <div id="gestureAnalysis"></div>
+            </div>
+            <div class="card">
+                <h2>Key Moments</h2>
+                <div id="keyMoments"></div>
+            </div>
+        </div>
+    </main>
+
+    <script>
+        const API_BASE = (location.hostname === 'localhost' || location.hostname === '127.0.0.1')
+            ? 'http://127.0.0.1:8000' : '';
+
+        const videoInput = document.getElementById('videoInput');
+        const analyzeBtn = document.getElementById('analyzeBtn');
+        const loading = document.getElementById('loading');
+        const videoPlayer = document.getElementById('videoPlayer');
+
+        analyzeBtn.addEventListener('click', async () => {
+            if (!videoInput.files || !videoInput.files[0]) {
+                alert('Please select a video file');
+                return;
+            }
+            const file = videoInput.files[0];
+            const url = URL.createObjectURL(file);
+            videoPlayer.src = url;
+            await uploadAndAnalyze(file);
+        });
+
+        async function uploadAndAnalyze(file) {
+            setLoading(true);
+            try {
+                const form = new FormData();
+                form.append('file', file);
+                const res = await fetch(`${API_BASE}/api/analyze`, { method: 'POST', body: form });
+                if (!res.ok) {
+                    throw new Error(await res.text());
+                }
+                const data = await res.json();
+                renderFromApi(data);
+            } catch (err) {
+                alert('Analysis failed: ' + err.message);
+            } finally {
+                setLoading(false);
+            }
+        }
+
+        function setLoading(isLoading) {
+            loading.style.display = isLoading ? 'flex' : 'none';
+            analyzeBtn.disabled = isLoading;
+            videoInput.disabled = isLoading;
+        }
+
+        function renderFromApi(data) {
+            document.getElementById('videoDuration').textContent = data?.stats?.duration ?? '--';
+            document.getElementById('motionEvents').textContent = data?.stats?.motionEvents ?? '--';
+            document.getElementById('gestureCount').textContent = data?.stats?.gestureCount ?? '--';
+            document.getElementById('dominantEmotion').textContent = data?.dominantEmotion ?? '--';
+
+            // Emotions
+            const emotionContainer = document.getElementById('emotionAnalysis');
+            emotionContainer.innerHTML = '';
+            (data.emotions || []).forEach(e => {
+                const span = document.createElement('span');
+                span.className = `emotion-badge ${e.name}`;
+                span.textContent = `${capitalize(e.name)} (${e.percent}%)`;
+                emotionContainer.appendChild(span);
+            });
+
+            // Motions
+            const motionContainer = document.getElementById('motionTracking');
+            motionContainer.innerHTML = '';
+            (data.motions || []).forEach(m => {
+                const div = document.createElement('div');
+                div.className = 'snapshot';
+                const canvas = createFaceSnapshot(m.direction, m.emotion);
+                canvas.className = 'snapshot-canvas';
+                div.innerHTML = `
+                    <div class="title">Head movement: ${m.direction.toUpperCase()}</div>
+                    <div class="meta">Time: ${m.timestamp} • Emotion: ${capitalize(m.emotion)} • Duration: ${m.duration}s • Accuracy: ${m.accuracy}%</div>
+                `;
+                div.appendChild(canvas);
+                motionContainer.appendChild(div);
+            });
+
+            // Gestures
+            const gestureContainer = document.getElementById('gestureAnalysis');
+            gestureContainer.innerHTML = '';
+            (data.gestures || []).forEach(g => {
+                const div = document.createElement('div');
+                div.className = 'snapshot';
+                const canvas = createGestureSnapshot(g.gesture);
+                canvas.className = 'snapshot-canvas';
+                div.innerHTML = `
+                    <div class="title">Gesture: ${g.gesture.toUpperCase()}</div>
+                    <div class="meta">Time: ${g.timestamp} • Confidence: ${g.confidence}% • Duration: ${g.duration}s • Activity: ${g.activity}</div>
+                `;
+                div.appendChild(canvas);
+                gestureContainer.appendChild(div);
+            });
+
+            // Moments
+            const momentsContainer = document.getElementById('keyMoments');
+            momentsContainer.innerHTML = '';
+            (data.moments || []).forEach(k => {
+                const div = document.createElement('div');
+                div.className = 'snapshot';
+                div.innerHTML = `
+                    <div class="title">${k.event}</div>
+                    <div class="meta">Time: ${k.timestamp}</div>
+                `;
+                momentsContainer.appendChild(div);
+            });
+        }
+
+        function capitalize(s) { return (s||'').charAt(0).toUpperCase() + (s||'').slice(1); }
+
+        // Simple synthetic snapshots
+        function createFaceSnapshot(direction, emotion) {
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+            canvas.width = 420; canvas.height = 236;
+            // background
+            const g = ctx.createLinearGradient(0,0,420,236);
+            g.addColorStop(0,'#122030'); g.addColorStop(1,'#0b1622');
+            ctx.fillStyle = g; ctx.fillRect(0,0,420,236);
+            // face oval
+            ctx.fillStyle = '#d4a574';
+            ctx.beginPath(); ctx.ellipse(210, 118, 68, 86, 0, 0, Math.PI*2); ctx.fill();
+            // eyes
+            ctx.fillStyle = '#fff';
+            ctx.beginPath(); ctx.ellipse(185, 100, 16, 10, 0, 0, Math.PI*2); ctx.fill();
+            ctx.beginPath(); ctx.ellipse(235, 100, 16, 10, 0, 0, Math.PI*2); ctx.fill();
+            // pupils shift by direction
+            const dx = direction === 'left' ? -4 : direction === 'right' ? 4 : 0;
+            ctx.fillStyle = '#2d1810';
+            ctx.beginPath(); ctx.arc(185+dx, 100, 6, 0, Math.PI*2); ctx.fill();
+            ctx.beginPath(); ctx.arc(235+dx, 100, 6, 0, Math.PI*2); ctx.fill();
+            // mouth by emotion
+            ctx.strokeStyle = '#8b4c6b'; ctx.lineWidth = 3; ctx.beginPath();
+            if (emotion === 'happy') { ctx.arc(210, 150, 18, 0, Math.PI); }
+            else if (emotion === 'sad') { ctx.arc(210, 168, 18, Math.PI, 2*Math.PI); }
+            else { ctx.moveTo(192, 158); ctx.lineTo(228, 158); }
+            ctx.stroke();
+            // bottom overlay text
+            ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillRect(0, 196, 420, 40);
+            ctx.fillStyle = '#00ff99'; ctx.font = 'bold 14px Arial';
+            ctx.fillText(`${direction.toUpperCase()}`, 12, 220);
+            ctx.fillStyle = '#fff'; ctx.font = '12px Arial';
+            ctx.fillText(`Emotion: ${capitalize(emotion)}`, 120, 220);
+            return canvas;
+        }
+
+        function createGestureSnapshot(gesture) {
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+            canvas.width = 420; canvas.height = 236;
+            const g = ctx.createLinearGradient(0,0,420,236);
+            g.addColorStop(0,'#e8f0ff'); g.addColorStop(1,'#dbe6ff');
+            ctx.fillStyle = g; ctx.fillRect(0,0,420,236);
+            ctx.fillStyle = '#223a5e'; ctx.font = 'bold 28px Arial';
+            ctx.fillText(gesture.toUpperCase(), 20, 60);
+            ctx.strokeStyle = '#ff6600'; ctx.lineWidth = 4;
+            ctx.strokeRect(20, 80, 120, 80);
+            ctx.fillStyle = '#ff6600'; ctx.font = '14px Arial';
+            ctx.fillText('Detected', 26, 126);
+            return canvas;
+        }
+    </script>
+</body>
+</html>
