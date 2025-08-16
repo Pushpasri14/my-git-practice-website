@@ -141,6 +141,25 @@ def api_list_screenshots(path: str, pattern: str = "eye_turn_*.jpg", limit: int 
 	}
 
 
+@app.get("/api/list_screenshots_by_session/{session_id}")
+def api_list_screenshots_by_session(session_id: str, pattern: str = "eye_turn_*.jpg", limit: int = 24):
+	s = sessions.get(session_id)
+	if not s:
+		raise HTTPException(status_code=404, detail="session not found")
+	user = s.get('user', 'User')
+	safe = _sanitize_user(user)
+	folder = os.path.join(base_dir, SCREENSHOT_FOLDER, safe)
+	if not os.path.isdir(folder):
+		return { 'files': [] }
+	names = []
+	for name in os.listdir(folder):
+		if fnmatch.fnmatch(name, pattern):
+			names.append(name)
+	names.sort(reverse=True)
+	names = names[:max(1, min(100, limit))]
+	return { 'files': [f"/api/file?path={os.path.join(folder, n)}" for n in names] }
+
+
 @app.get("/api/session_paths/{session_id}")
 def api_session_paths(session_id: str):
 	s = sessions.get(session_id)

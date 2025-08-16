@@ -95,7 +95,7 @@ function renderEmotions(emotions) {
 async function refreshScreenshots(folder) {
 	screenshotsEl.innerHTML = '';
 	try {
-		const res = await fetch(`/api/list_screenshots?path=${encodeURIComponent(folder)}`);
+		const res = await fetch(`/api/list_screenshots_by_session/${sessionId}`);
 		if (!res.ok) throw new Error('list failed');
 		const data = await res.json();
 		for (const url of data.files) {
@@ -107,7 +107,7 @@ async function refreshScreenshots(folder) {
 		if ((data.files || []).length === 0) {
 			const hint = document.createElement('div');
 			hint.style.color = '#94a3b8';
-			hint.textContent = 'No screenshots yet. Hold gaze left/right for 2s.';
+			hint.textContent = 'No screenshots yet.';
 			screenshotsEl.appendChild(hint);
 		}
 	} catch (e) {
