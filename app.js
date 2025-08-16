@@ -51,7 +51,7 @@ function startPolling() {
 	}, 1000);
 }
 
-function renderStatus(data) {
+async function renderStatus(data) {
 	statusEl.textContent = data.status;
 	if (data.state) {
 		const s = data.state;
