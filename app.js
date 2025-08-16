@@ -1,19 +1,33 @@
 const form = document.getElementById('uploadForm');
-const sessionBlock = document.getElementById('session');
-const statusEl = document.getElementById('status');
-const progressEl = document.getElementById('progress');
+const startBtn = document.getElementById('startBtn');
+const statusPill = document.getElementById('statusPill');
+const timeRange = document.getElementById('timeRange');
+const yearEl = document.getElementById('year');
+if (yearEl) yearEl.textContent = new Date().getFullYear();
+
 const domEmotionEl = document.getElementById('dominantEmotion');
 const emotionBarsEl = document.getElementById('emotionBars');
 const gazeEl = document.getElementById('gaze');
 const eyeTurnsEl = document.getElementById('eyeTurns');
 const smileEl = document.getElementById('smile');
 const logLinkEl = document.getElementById('logLink');
-const summaryLinkEl = document.getElementById('summaryLink');
 const videoLinkEl = document.getElementById('videoLink');
+const previewVideo = document.getElementById('previewVideo');
+const refreshShotsBtn = document.getElementById('refreshShots');
 const screenshotsEl = document.getElementById('screenshots');
 
 let sessionId = null;
 let pollTimer = null;
+
+function setPill(status) {
+	if (!statusPill) return;
+	statusPill.classList.remove('running','idle','error','done');
+	statusPill.textContent = status;
+	if (status === 'running') statusPill.classList.add('running');
+	else if (status === 'idle') statusPill.classList.add('idle');
+	else if (status === 'completed') statusPill.classList.add('done');
+	else if (status === 'error') statusPill.classList.add('error');
+}
 
 form.addEventListener('submit', async (e) => {
 	e.preventDefault();
@@ -22,20 +36,20 @@ form.addEventListener('submit', async (e) => {
 	const file = document.getElementById('video').files[0];
 	if (!file) return;
 	fd.append('file', file);
-
-	statusEl.textContent = 'uploading...';
-	sessionBlock.classList.remove('hidden');
-
+	startBtn.disabled = true;
+	setPill('running');
 	const res = await fetch('/api/analyze', { method: 'POST', body: fd });
 	if (!res.ok) {
-		statusEl.textContent = 'failed to start analysis';
+		setPill('error');
+		startBtn.disabled = false;
 		return;
 	}
 	const data = await res.json();
 	sessionId = data.session_id;
-	statusEl.textContent = 'running';
 	startPolling();
 });
+
+if (refreshShotsBtn) refreshShotsBtn.addEventListener('click', () => { if (sessionId) refreshScreenshots(''); });
 
 function startPolling() {
 	if (pollTimer) clearInterval(pollTimer);
@@ -44,7 +58,7 @@ function startPolling() {
 		const res = await fetch(`/api/status/${sessionId}`);
 		if (res.status === 404) {
 			clearInterval(pollTimer);
-			statusEl.textContent = 'Session expired. Please start a new analysis.';
+			setPill('idle');
 			sessionId = null;
 			return;
 		}
@@ -54,7 +68,6 @@ function startPolling() {
 		if (data.status === 'completed' || data.status === 'error') {
 			clearInterval(pollTimer);
 		}
-		// refresh screenshots periodically while running
 		if (data.status === 'running') {
 			refreshScreenshots('');
 		}
@@ -62,19 +75,23 @@ function startPolling() {
 }
 
 async function renderStatus(data) {
-	statusEl.textContent = data.status;
+	setPill(data.status);
 	if (data.state) {
 		const s = data.state;
 		domEmotionEl.textContent = s.dominant_emotion || '-';
-		gazeEl.textContent = `Gaze: ${s.current_gaze_direction || '-'}  |  ${formatTime(s.video_timestamp || 0)}`;
-		eyeTurnsEl.textContent = `Eye Turns: ${s.eye_turn_count || 0}`;
-		smileEl.textContent = `Smile: ${(s.smile_confidence || 0).toFixed(2)}`;
+		gazeEl.textContent = s.current_gaze_direction ? s.current_gaze_direction.toUpperCase() : '-';
+		eyeTurnsEl.textContent = `${s.eye_turn_count || 0}`;
+		smileEl.textContent = `${(s.smile_confidence || 0).toFixed(2)}`;
+		timeRange.textContent = `${formatTime(s.video_timestamp || 0)}`;
 		renderEmotions(s.emotions || {});
 	}
 	if (data.outputs) {
 		const { log_file, analyzed_video, screenshots_folder } = data.outputs;
 		logLinkEl.innerHTML = log_file ? `<a href="/api/file?path=${encodeURIComponent(log_file)}" target="_blank">Download Log</a>` : '';
 		videoLinkEl.innerHTML = analyzed_video ? `<a href="/api/file?path=${encodeURIComponent(analyzed_video)}&download=true" target="_blank">Download Analyzed Video</a>` : '';
+		if (analyzed_video && previewVideo) {
+			previewVideo.src = `/api/file?path=${encodeURIComponent(analyzed_video)}`;
+		}
 		if (screenshots_folder) {
 			refreshScreenshots(screenshots_folder);
 		} else if (sessionId) {
@@ -94,10 +111,12 @@ function renderEmotions(emotions) {
 	const entries = Object.entries(emotions).sort((a,b) => b[1]-a[1]).slice(0,7);
 	for (const [name, score] of entries) {
 		const row = document.createElement('div');
-		row.innerHTML = `<div style="display:flex; justify-content:space-between; font-size:12px; color:#94a3b8;">
-			<span>${capitalize(name)}</span><span>${score.toFixed(1)}%</span>
-		</div>
-		<div class="bar"><div style="width:${Math.min(100, score)}%"></div></div>`;
+		row.className = 'bar-row';
+		row.innerHTML = `
+			<div class="bar-label">${capitalize(name)}</div>
+			<div class="bar"><div class="bar-fill" style="width:${Math.min(100, score)}%"></div></div>
+			<div class="bar-val">${score.toFixed(1)}%</div>
+		`;
 		emotionBarsEl.appendChild(row);
 	}
 }
@@ -116,13 +135,13 @@ async function refreshScreenshots(folder) {
 		}
 		if ((data.files || []).length === 0) {
 			const hint = document.createElement('div');
-			hint.style.color = '#94a3b8';
+			hint.className = 'bar-label';
 			hint.textContent = 'No screenshots yet.';
 			screenshotsEl.appendChild(hint);
 		}
 	} catch (e) {
 		const hint = document.createElement('div');
-		hint.style.color = '#94a3b8';
+		hint.className = 'bar-label';
 		hint.textContent = 'Unable to load screenshots.';
 		screenshotsEl.appendChild(hint);
 	}
