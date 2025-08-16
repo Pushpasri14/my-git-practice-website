@@ -30,6 +30,8 @@ shared_data = {
 	'hand_status': "Inactive",
 	'hand_landmarks': [],
 	'eye_turn_count': 0,
+	'left_eye_turns': 0,
+	'right_eye_turns': 0,
 	'current_gaze_direction': 'center',
 	'previous_gaze_direction': 'center',
 	'gaze_start_time': 0,
@@ -534,6 +536,10 @@ def video_process(user_name: str, video_path: str, on_update: Optional[Callable[
 							time_held = current_time - shared_data['gaze_start_time']
 							if time_held >= shared_data['gaze_hold_duration']:
 								shared_data['eye_turn_count'] += 1
+								if new_gaze_direction == 'left':
+									shared_data['left_eye_turns'] = shared_data.get('left_eye_turns', 0) + 1
+								elif new_gaze_direction == 'right':
+									shared_data['right_eye_turns'] = shared_data.get('right_eye_turns', 0) + 1
 								shared_data['gaze_counted'] = True
 								if not shared_data['screenshot_taken'] and current_frame is not None:
 									save_screenshot(current_frame, user_name, new_gaze_direction, shared_data['video_timestamp'])
@@ -746,7 +752,7 @@ def video_process(user_name: str, video_path: str, on_update: Optional[Callable[
 				# hand + eye turns
 				cv2.putText(frame, f"Hand: {shared_data.get('hand_status','Inactive')}", (15, text_y), font, 0.9, white, 2, cv2.LINE_AA)
 				text_y += 32
-				cv2.putText(frame, f"Eye Turns: {shared_data.get('eye_turn_count',0)}", (15, text_y), font, 0.9, green if shared_data.get('eye_turn_count',0)>0 else white, 2, cv2.LINE_AA)
+				cv2.putText(frame, f"Eye Turns: {shared_data.get('eye_turn_count',0)} (L:{shared_data.get('left_eye_turns',0)} R:{shared_data.get('right_eye_turns',0)})", (15, text_y), font, 0.9, green if shared_data.get('eye_turn_count',0)>0 else white, 2, cv2.LINE_AA)
 				text_y += 32
 				# gaze
 				gaze = shared_data.get('current_gaze_direction','center')
@@ -790,11 +796,13 @@ def video_process(user_name: str, video_path: str, on_update: Optional[Callable[
 				summary = []
 				with data_lock:
 					eye_turns = shared_data.get('eye_turn_count', 0)
+					l_turns = shared_data.get('left_eye_turns', 0)
+					r_turns = shared_data.get('right_eye_turns', 0)
 					cnts = shared_data.get('emotion_counts', {})
 					top2 = sorted(cnts.items(), key=lambda kv: kv[1], reverse=True)[:2]
 					top_txt = ", ".join([k.capitalize() for k,_ in top2]) if top2 else "-"
 				summary.append(f"Analysis complete for {user_name}")
-				summary.append(f"Total eye turns: {eye_turns}")
+				summary.append(f"Total eye turns: {eye_turns} (L:{l_turns} R:{r_turns})")
 				summary.append(f"Top emotions: {top_txt}")
 				# create slate
 				slate = np.zeros((height, width, 3), dtype=np.uint8)
@@ -843,6 +851,8 @@ def run_analysis(user_name: str, video_path: str, on_update: Optional[Callable[[
 	with data_lock:
 		shared_data['is_running'] = True
 		shared_data['eye_turn_count'] = 0
+		shared_data['left_eye_turns'] = 0
+		shared_data['right_eye_turns'] = 0
 		shared_data['gaze_history'] = []
 		shared_data['emotion_start_time'] = {}
 		shared_data['ema_emotions'] = {}
