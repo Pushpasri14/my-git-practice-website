@@ -81,6 +81,19 @@ ANALYZED_VIDEO_PATH = None
 USER_SCREENSHOT_FOLDER = None
 SESSION_TIMESTAMP = None
 
+# Fallback face detector (OpenCV Haar cascade)
+_CASCADE = None
+
+def _load_cascade():
+	global _CASCADE
+	if _CASCADE is None:
+		try:
+			cascade_path = os.path.join(cv2.data.haarcascades, 'haarcascade_frontalface_default.xml')
+			_CASCADE = cv2.CascadeClassifier(cascade_path)
+		except Exception:
+			_CASCADE = None
+	return _CASCADE
+
 # Utility
 
 def clamp(x, lo, hi):
@@ -369,6 +382,41 @@ def get_face_roi_from_detection(frame, detection):
 		return None, None
 
 
+def get_face_roi_from_rect(frame, rect, margin_ratio: float = 0.18):
+	try:
+		h, w = frame.shape[:2]
+		x, y, rw, rh = rect
+		mx = int(rw * margin_ratio)
+		my = int(rh * margin_ratio)
+		x0 = clamp(x - mx, 0, w - 1)
+		y0 = clamp(y - my, 0, h - 1)
+		x1 = clamp(x + rw + mx, 1, w)
+		y1 = clamp(y + rh + my, 1, h)
+		x0, y0, x1, y1 = int(x0), int(y0), int(x1), int(y1)
+		if x1 <= x0 or y1 <= y0:
+			return None, None
+		roi = frame[y0:y1, x0:x1]
+		return roi, {'x': x0, 'y': y0, 'w': x1 - x0, 'h': y1 - y0}
+	except Exception:
+		return None, None
+
+
+def detect_face_cascade(frame):
+	try:
+		casc = _load_cascade()
+		if casc is None:
+			return None
+		gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+		faces = casc.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(60, 60))
+		if faces is None or len(faces) == 0:
+			return None
+		# pick largest face
+		faces = sorted(list(faces), key=lambda r: r[2] * r[3], reverse=True)
+		return faces[0]
+	except Exception:
+		return None
+
+
 def video_process(user_name: str, video_path: str, on_update: Optional[Callable[[Dict[str, Any]], None]] = None, headless: bool = True):
 	global current_frame, VIDEO_WRITER, ANALYZED_VIDEO_PATH
 	cap = cv2.VideoCapture(video_path)
@@ -398,6 +446,12 @@ def video_process(user_name: str, video_path: str, on_update: Optional[Callable[
 
 	frame_count = 0
 	last_update_ts = time.time()
+	# periodic screenshot fallback
+	with data_lock:
+		if 'last_screenshot_time' not in shared_data:
+			shared_data['last_screenshot_time'] = 0.0
+		if 'screenshot_interval' not in shared_data:
+			shared_data['screenshot_interval'] = 30.0
 	try:
 		while shared_data['is_running']:
 			ret, frame = cap.read()
@@ -571,11 +625,58 @@ def video_process(user_name: str, video_path: str, on_update: Optional[Callable[
 									shared_data['stable_emotion'] = "No Face"
 									shared_data['emotions'] = {}
 									shared_data['face_region'] = None
+				else:
+					# OpenCV Haar fallback
+					rect = detect_face_cascade(frame)
+					if rect is not None:
+						roi, region = get_face_roi_from_rect(frame, rect)
+						if roi is not None:
+							roi_pre = preprocess_face_roi(roi)
+							result = None
+							try:
+								if _deepface_available:
+									result = DeepFace.analyze(img_path=roi_pre, actions=['emotion'], enforce_detection=False, detector_backend='skip', align=True)
+								else:
+									result = None
+							except Exception:
+								result = None
+							if isinstance(result, list) and len(result) > 0:
+								data = result[0]
+							elif isinstance(result, dict):
+								data = result
+							else:
+								data = None
+							with data_lock:
+								if data and 'emotion' in data:
+									raw_emotions = {k: float(v) for k, v in data['emotion'].items()}
+									shared_data['ema_emotions'], _ = smooth_emotions_ema(raw_emotions, shared_data.get('ema_emotions', {}), alpha=shared_data.get('ema_alpha', 0.35))
+									max_emotion = max(shared_data['ema_emotions'], key=shared_data['ema_emotions'].get)
+									shared_data['emotions'] = shared_data['ema_emotions']
+									shared_data['dominant_emotion'] = f"{max_emotion}"
+									shared_data['face_region'] = region
+									emotion_updated = True
+								else:
+									shared_data['dominant_emotion'] = shared_data.get('dominant_emotion', 'No Face')
+									shared_data['face_region'] = region
+						else:
+							with data_lock:
+								shared_data['dominant_emotion'] = "No Face"
+								shared_data['emotions'] = {}
+								shared_data['face_region'] = None
 			except Exception:
 				with data_lock:
 					shared_data['dominant_emotion'] = "No Face"
 					shared_data['emotions'] = {}
 					shared_data['face_region'] = None
+
+			# Periodic screenshot fallback when iris tracking is unavailable
+			if not _mediapipe_available:
+				with data_lock:
+					now = time.time()
+					if (now - shared_data.get('last_screenshot_time', 0.0)) >= shared_data.get('screenshot_interval', 30.0):
+						if current_frame is not None:
+							save_screenshot(current_frame, user_name, shared_data['current_gaze_direction'], shared_data['video_timestamp'])
+							shared_data['last_screenshot_time'] = now
 			# Draw overlays to frame for video writer only
 			with data_lock:
 				if shared_data['face_region']:
