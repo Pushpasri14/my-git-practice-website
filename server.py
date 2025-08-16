@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 import fnmatch
+from urllib.parse import quote
 
 from backend_analysis import run_analysis, shared_data, data_lock, LOG_FOLDER, SCREENSHOT_FOLDER
 
@@ -160,7 +161,7 @@ def api_list_screenshots_by_session(session_id: str, pattern: str = "eye_turn_*.
 			names.append(name)
 	names.sort(reverse=True)
 	names = names[:max(1, min(100, limit))]
-	return { 'files': [f"/api/file?path={os.path.join(folder, n)}" for n in names] }
+	return { 'files': [f"/api/file?path={quote(os.path.join(folder, n))}" for n in names] }
 
 
 @app.get("/api/session_paths/{session_id}")

@@ -42,11 +42,21 @@ function startPolling() {
 	pollTimer = setInterval(async () => {
 		if (!sessionId) return;
 		const res = await fetch(`/api/status/${sessionId}`);
+		if (res.status === 404) {
+			clearInterval(pollTimer);
+			statusEl.textContent = 'Session expired. Please start a new analysis.';
+			sessionId = null;
+			return;
+		}
 		if (!res.ok) return;
 		const data = await res.json();
 		renderStatus(data);
 		if (data.status === 'completed' || data.status === 'error') {
 			clearInterval(pollTimer);
+		}
+		// refresh screenshots periodically while running
+		if (data.status === 'running') {
+			refreshScreenshots('');
 		}
 	}, 1000);
 }
