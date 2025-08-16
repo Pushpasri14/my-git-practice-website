@@ -177,10 +177,10 @@ def setup_logging(user_name):
 	global LOG_FILE, USER_SCREENSHOT_FOLDER, SESSION_TIMESTAMP, ANALYZED_VIDEO_PATH
 	create_directories()
 	safe_name = "".join(c for c in user_name if c.isalnum() or c in (' ', '-', '_')).rstrip().replace(' ', '_')
-	user_screenshot_folder = os.path.join(SCREENSHOT_DIR, safe_name)
+	timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+	user_screenshot_folder = os.path.join(SCREENSHOT_DIR, safe_name, timestamp)
 	os.makedirs(user_screenshot_folder, exist_ok=True)
 	USER_SCREENSHOT_FOLDER = user_screenshot_folder
-	timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 	SESSION_TIMESTAMP = timestamp
 	log_filename = f"{safe_name}_video_analysis_{timestamp}.txt"
 	LOG_FILE = os.path.join(LOG_DIR, log_filename)
@@ -204,7 +204,7 @@ def save_screenshot(frame, user_name, gaze_direction, video_timestamp):
 		video_time_str = format_video_time(video_timestamp)
 		video_time_detailed = format_detailed_video_time(video_timestamp)
 		safe_name = "".join(c for c in user_name if c.isalnum() or c in (' ', '-', '_')).rstrip().replace(' ', '_')
-		user_screenshot_folder = os.path.join(SCREENSHOT_DIR, safe_name)
+		user_screenshot_folder = USER_SCREENSHOT_FOLDER or os.path.join(SCREENSHOT_DIR, safe_name, SESSION_TIMESTAMP)
 		screenshot_filename = f"eye_turn_{gaze_direction}_video{video_time_str.replace(':', 'm')}_sys{system_timestamp}.jpg"
 		screenshot_path = os.path.join(user_screenshot_folder, screenshot_filename)
 		frame_with_overlay = frame.copy()
@@ -598,17 +598,18 @@ def video_process(user_name: str, video_path: str, on_update: Optional[Callable[
 									for neg in ['angry', 'disgust', 'fear']:
 										if neg in raw_emotions:
 											raw_emotions[neg] = raw_emotions[neg] * (0.65 if smile_c > 0.7 else 0.8)
-								ema_state, max_key = smooth_emotions_ema(raw_emotions, shared_data.get('ema_emotions', {}), alpha=shared_data.get('ema_alpha', 0.35))
+								ema_state, _ = smooth_emotions_ema(raw_emotions, shared_data.get('ema_emotions', {}), alpha=shared_data.get('ema_alpha', 0.35))
 								shared_data['ema_emotions'] = ema_state
 								if ema_state:
+									# require stability: gap and sample count
+									vals_sorted = sorted(ema_state.values(), reverse=True)
+									gap = (vals_sorted[0] - vals_sorted[1]) if len(vals_sorted) > 1 else vals_sorted[0]
 									max_emotion = max(ema_state, key=ema_state.get)
-									second = sorted(ema_state.values(), reverse=True)[1] if len(ema_state) > 1 else 0.0
-									confidence_gap = ema_state[max_emotion] - second
 									is_stable = track_emotion_duration(max_emotion, current_time, shared_data['emotion_start_time'], shared_data['emotion_duration_threshold'])
 									reset_emotion_tracking(shared_data['emotion_start_time'], max_emotion)
 									shared_data['emotions'] = ema_state
 									shared_data['face_region'] = region
-									if is_stable and confidence_gap >= 6.0:
+									if is_stable and gap >= 8.0:
 										shared_data['stable_emotion'] = max_emotion
 										shared_data['dominant_emotion'] = max_emotion
 										shared_data['confirmed_emotions'][max_emotion] = current_time
@@ -832,7 +833,7 @@ def cleanup_and_finalize(user_name: str):
 	if LOG_FILE and os.path.exists(LOG_FILE):
 		try:
 			safe_name = "".join(c for c in user_name if c.isalnum() or c in (' ', '-', '_')).rstrip().replace(' ', '_')
-			user_screenshot_folder = os.path.join(SCREENSHOT_DIR, safe_name)
+			user_screenshot_folder = USER_SCREENSHOT_FOLDER or os.path.join(SCREENSHOT_DIR, safe_name, SESSION_TIMESTAMP)
 			with open(LOG_FILE, 'a', encoding='utf-8') as f:
 				f.write("\n" + "="*80 + "\n")
 				f.write(f"Video analysis session ended at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
