@@ -81,6 +81,11 @@ ANALYZED_VIDEO_PATH = None
 USER_SCREENSHOT_FOLDER = None
 SESSION_TIMESTAMP = None
 
+# Anchor directories to project base
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+LOG_DIR = os.path.join(BASE_DIR, LOG_FOLDER)
+SCREENSHOT_DIR = os.path.join(BASE_DIR, SCREENSHOT_FOLDER)
+
 # Fallback face detector (OpenCV Haar cascade)
 _CASCADE = None
 
@@ -100,8 +105,8 @@ def clamp(x, lo, hi):
 	return max(lo, min(hi, x))
 
 def create_directories():
-	os.makedirs(LOG_FOLDER, exist_ok=True)
-	os.makedirs(SCREENSHOT_FOLDER, exist_ok=True)
+	os.makedirs(LOG_DIR, exist_ok=True)
+	os.makedirs(SCREENSHOT_DIR, exist_ok=True)
 
 
 def format_video_time(seconds):
@@ -168,13 +173,13 @@ def setup_logging(user_name):
 	global LOG_FILE, USER_SCREENSHOT_FOLDER, SESSION_TIMESTAMP, ANALYZED_VIDEO_PATH
 	create_directories()
 	safe_name = "".join(c for c in user_name if c.isalnum() or c in (' ', '-', '_')).rstrip().replace(' ', '_')
-	user_screenshot_folder = os.path.join(SCREENSHOT_FOLDER, safe_name)
+	user_screenshot_folder = os.path.join(SCREENSHOT_DIR, safe_name)
 	os.makedirs(user_screenshot_folder, exist_ok=True)
 	USER_SCREENSHOT_FOLDER = user_screenshot_folder
 	timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 	SESSION_TIMESTAMP = timestamp
 	log_filename = f"{safe_name}_video_analysis_{timestamp}.txt"
-	LOG_FILE = os.path.join(LOG_FOLDER, log_filename)
+	LOG_FILE = os.path.join(LOG_DIR, log_filename)
 	ANALYZED_VIDEO_PATH = os.path.join(user_screenshot_folder, f"{safe_name}_ANALYZED_{timestamp}.mp4")
 	with open(LOG_FILE, 'w', encoding='utf-8') as f:
 		f.write("="*80 + "\n")
@@ -195,7 +200,7 @@ def save_screenshot(frame, user_name, gaze_direction, video_timestamp):
 		video_time_str = format_video_time(video_timestamp)
 		video_time_detailed = format_detailed_video_time(video_timestamp)
 		safe_name = "".join(c for c in user_name if c.isalnum() or c in (' ', '-', '_')).rstrip().replace(' ', '_')
-		user_screenshot_folder = os.path.join(SCREENSHOT_FOLDER, safe_name)
+		user_screenshot_folder = os.path.join(SCREENSHOT_DIR, safe_name)
 		screenshot_filename = f"eye_turn_{gaze_direction}_video{video_time_str.replace(':', 'm')}_sys{system_timestamp}.jpg"
 		screenshot_path = os.path.join(user_screenshot_folder, screenshot_filename)
 		frame_with_overlay = frame.copy()
@@ -451,7 +456,7 @@ def video_process(user_name: str, video_path: str, on_update: Optional[Callable[
 		if 'last_screenshot_time' not in shared_data:
 			shared_data['last_screenshot_time'] = 0.0
 		if 'screenshot_interval' not in shared_data:
-			shared_data['screenshot_interval'] = 30.0
+			shared_data['screenshot_interval'] = 5.0
 	try:
 		while shared_data['is_running']:
 			ret, frame = cap.read()
@@ -730,7 +735,7 @@ def cleanup_and_finalize(user_name: str):
 	if LOG_FILE and os.path.exists(LOG_FILE):
 		try:
 			safe_name = "".join(c for c in user_name if c.isalnum() or c in (' ', '-', '_')).rstrip().replace(' ', '_')
-			user_screenshot_folder = os.path.join(SCREENSHOT_FOLDER, safe_name)
+			user_screenshot_folder = os.path.join(SCREENSHOT_DIR, safe_name)
 			with open(LOG_FILE, 'a', encoding='utf-8') as f:
 				f.write("\n" + "="*80 + "\n")
 				f.write(f"Video analysis session ended at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
