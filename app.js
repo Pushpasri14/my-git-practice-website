@@ -67,6 +67,14 @@ function renderStatus(data) {
 		videoLinkEl.innerHTML = analyzed_video ? `<a href="/api/file?path=${encodeURIComponent(analyzed_video)}&download=true" target="_blank">Download Analyzed Video</a>` : '';
 		if (screenshots_folder) {
 			refreshScreenshots(screenshots_folder);
+		} else if (sessionId) {
+			try {
+				const p = await fetch(`/api/session_paths/${sessionId}`);
+				if (p.ok) {
+					const j = await p.json();
+					if (j.screenshots_folder) refreshScreenshots(j.screenshots_folder);
+				}
+			} catch {}
 		}
 	}
 }

@@ -51,6 +51,13 @@ def _is_under_base(path: str) -> bool:
 		return False
 
 
+def _sanitize_user(user: str) -> str:
+	if not user:
+		return "User"
+	safe = ''.join(c for c in user if c.isalnum() or c in (' ', '-', '_')).rstrip()
+	return safe.replace(' ', '_')
+
+
 def analysis_thread(session_id: str, user_name: str, video_path: str):
 	def on_update(state: Dict[str, Any]):
 		with threading.Lock():
@@ -132,6 +139,17 @@ def api_list_screenshots(path: str, pattern: str = "eye_turn_*.jpg", limit: int 
 	return {
 		'files': [f"/api/file?path={os.path.join(path, e['name'])}" for e in entries]
 	}
+
+
+@app.get("/api/session_paths/{session_id}")
+def api_session_paths(session_id: str):
+	s = sessions.get(session_id)
+	if not s:
+		raise HTTPException(status_code=404, detail="session not found")
+	user = s.get('user', 'User')
+	safe = _sanitize_user(user)
+	screenshots_folder = os.path.join(base_dir, SCREENSHOT_FOLDER, safe)
+	return { 'screenshots_folder': screenshots_folder }
 
 
 @app.get("/")
