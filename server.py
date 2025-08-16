@@ -20,21 +20,35 @@ app.add_middleware(
 	allow_headers=["*"],
 )
 
-# Serve workspace static files and outputs
-static_root = "/workspace"
+# Serve static files and outputs
+base_dir = os.path.dirname(os.path.abspath(__file__))
+static_root = base_dir
 if os.path.isdir(static_root):
 	app.mount("/static", StaticFiles(directory=static_root), name="static")
-if os.path.isdir(os.path.join(static_root, LOG_FOLDER)):
-	app.mount("/logs", StaticFiles(directory=os.path.join(static_root, LOG_FOLDER)), name="logs")
-if os.path.isdir(os.path.join(static_root, SCREENSHOT_FOLDER)):
-	app.mount("/screenshots", StaticFiles(directory=os.path.join(static_root, SCREENSHOT_FOLDER)), name="screenshots")
+logs_dir = os.path.join(base_dir, LOG_FOLDER)
+screens_dir = os.path.join(base_dir, SCREENSHOT_FOLDER)
+if os.path.isdir(logs_dir):
+	app.mount("/logs", StaticFiles(directory=logs_dir), name="logs")
+if os.path.isdir(screens_dir):
+	app.mount("/screenshots", StaticFiles(directory=screens_dir), name="screenshots")
 
-UPLOAD_DIR = "/workspace/uploads"
+UPLOAD_DIR = os.path.join(base_dir, "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
 
 # Session storage (single user focus)
 sessions: Dict[str, Dict[str, Any]] = {}
+
+
+def _is_under_base(path: str) -> bool:
+	try:
+		abs_p = os.path.abspath(path)
+		abs_base = os.path.abspath(base_dir)
+		abs_p_norm = os.path.normcase(os.path.realpath(abs_p))
+		abs_base_norm = os.path.normcase(os.path.realpath(abs_base))
+		return abs_p_norm == abs_base_norm or abs_p_norm.startswith(abs_base_norm + os.sep)
+	except Exception:
+		return False
 
 
 def analysis_thread(session_id: str, user_name: str, video_path: str):
