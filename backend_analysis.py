@@ -53,7 +53,9 @@ shared_data = {
 	'ema_alpha': 0.35,
 	'mouth_width_ratio': 0.0,
 	'mouth_height_ratio': 0.0,
-	'smile_confidence': 0.0
+	'smile_confidence': 0.0,
+	# aggregate counts for summary
+	'emotion_counts': {}
 }
 
 data_lock = threading.Lock()
@@ -698,10 +700,69 @@ def video_process(user_name: str, video_path: str, on_update: Optional[Callable[
 							shared_data['last_screenshot_time'] = now
 			# Draw overlays to frame for video writer only
 			with data_lock:
+				# update simple emotion counts for summary
+				try:
+					label = shared_data.get('dominant_emotion') or ''
+					label = label.split(' ')[0].strip().lower()
+					if label and label not in ['no', 'neutral']:
+						cnts = shared_data.get('emotion_counts', {})
+						cnts[label] = cnts.get(label, 0) + 1
+						shared_data['emotion_counts'] = cnts
+				except Exception:
+					pass
+				# overlays
 				if shared_data['face_region']:
 					face_region = shared_data['face_region']
 					x, y, w_, h_ = face_region['x'], face_region['y'], face_region['w'], face_region['h']
 					cv2.rectangle(frame, (x, y), (x + w_, y + h_), (255, 0, 0), 2)
+				# HUD
+				font = cv2.FONT_HERSHEY_SIMPLEX
+				white = (255, 255, 255)
+				cyan = (255, 255, 0)
+				green = (0, 255, 0)
+				yellow = (0, 255, 255)
+				red = (0, 0, 255)
+				text_y = 35
+				# video time
+				cv2.putText(frame, f"Time: {format_video_time(shared_data['video_timestamp'])}", (15, text_y), font, 0.8, cyan, 2, cv2.LINE_AA)
+				text_y += 35
+				# dominant emotion
+				emo = shared_data.get('dominant_emotion', 'No Face')
+				emo_color = white if 'detecting' not in emo else yellow
+				cv2.putText(frame, f"Emotion: {emo}", (15, text_y), font, 1.0, emo_color, 2, cv2.LINE_AA)
+				text_y += 35
+				# top emotions (text bars)
+				top = []
+				if shared_data.get('emotions'):
+					top = sorted(shared_data['emotions'].items(), key=lambda kv: kv[1], reverse=True)[:4]
+				for name, score in top:
+					bar_w = int(score * 2)
+					cv2.rectangle(frame, (15, text_y - 10), (15 + bar_w, text_y), (50, 200, 50), -1)
+					cv2.putText(frame, f"{name.capitalize()}: {score:.1f}%", (230, text_y), font, 0.7, white, 2, cv2.LINE_AA)
+					text_y += 28
+				# smile
+				cv2.putText(frame, f"Smile: {shared_data.get('smile_confidence', 0.0):.2f}", (15, text_y), font, 0.8, (180,220,255), 2, cv2.LINE_AA)
+				text_y += 30
+				# hand + eye turns
+				cv2.putText(frame, f"Hand: {shared_data.get('hand_status','Inactive')}", (15, text_y), font, 0.9, white, 2, cv2.LINE_AA)
+				text_y += 32
+				cv2.putText(frame, f"Eye Turns: {shared_data.get('eye_turn_count',0)}", (15, text_y), font, 0.9, green if shared_data.get('eye_turn_count',0)>0 else white, 2, cv2.LINE_AA)
+				text_y += 32
+				# gaze
+				gaze = shared_data.get('current_gaze_direction','center')
+				gaze_color = cyan
+				if shared_data.get('gaze_start_time',0)>0 and gaze in ['left','right']:
+					hold = time.time() - shared_data['gaze_start_time']
+					if hold >= shared_data['gaze_hold_duration']:
+						gaze_color = green
+					elif hold >= shared_data['gaze_hold_duration']*0.5:
+						gaze_color = yellow
+					else:
+						gaze_color = red
+					cv2.putText(frame, f"Gaze: {gaze.upper()} ({hold:.1f}s)", (15, text_y), font, 0.9, gaze_color, 2, cv2.LINE_AA)
+				else:
+					cv2.putText(frame, f"Gaze: {gaze.upper()}", (15, text_y), font, 0.9, gaze_color, 2, cv2.LINE_AA)
+				text_y += 32
 			# Write frame to video
 			if writer_initialized and VIDEO_WRITER is not None:
 				try:
@@ -719,7 +780,35 @@ def video_process(user_name: str, video_path: str, on_update: Optional[Callable[
 	finally:
 		cap.release()
 		try:
-			if VIDEO_WRITER is not None:
+			# append summary slate at end of analyzed video
+			if writer_initialized and VIDEO_WRITER is not None:
+				# build summary frame over last frame size or default HD
+				try:
+					height, width = frame.shape[:2]
+				except Exception:
+					width, height = 1280, 720
+				summary = []
+				with data_lock:
+					eye_turns = shared_data.get('eye_turn_count', 0)
+					cnts = shared_data.get('emotion_counts', {})
+					top2 = sorted(cnts.items(), key=lambda kv: kv[1], reverse=True)[:2]
+					top_txt = ", ".join([k.capitalize() for k,_ in top2]) if top2 else "-"
+				summary.append(f"Analysis complete for {user_name}")
+				summary.append(f"Total eye turns: {eye_turns}")
+				summary.append(f"Top emotions: {top_txt}")
+				# create slate
+				slate = np.zeros((height, width, 3), dtype=np.uint8)
+				cv2.rectangle(slate, (40, 40), (width-40, height-40), (30, 30, 30), -1)
+				font = cv2.FONT_HERSHEY_SIMPLEX
+				y = 140
+				cv2.putText(slate, "SESSION SUMMARY", (80, y), font, 1.6, (255,255,255), 3, cv2.LINE_AA)
+				y += 70
+				for line in summary:
+					cv2.putText(slate, line, (80, y), font, 1.2, (200,230,255), 2, cv2.LINE_AA)
+					y += 60
+				# hold slate ~3s
+				for _ in range(int(fps*3)):
+					VIDEO_WRITER.write(slate)
 				VIDEO_WRITER.release()
 		except Exception:
 			pass
