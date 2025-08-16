@@ -656,7 +656,21 @@ def video_process(user_name: str, video_path: str, on_update: Optional[Callable[
 									shared_data['face_region'] = region
 									emotion_updated = True
 								else:
-									shared_data['dominant_emotion'] = shared_data.get('dominant_emotion', 'No Face')
+									# Heuristic emotions when DeepFace not available
+									smile_c = shared_data.get('smile_confidence', 0.0)
+									heuristic = {
+										'neutral': max(0.0, 80.0 - 30.0 * smile_c),
+										'happy': max(0.0, 15.0 + 70.0 * smile_c),
+										'angry': 2.0 * (1.0 - smile_c),
+										'sad': 2.0 * (1.0 - smile_c),
+										'fear': 1.0 * (1.0 - smile_c),
+										'disgust': 0.5 * (1.0 - smile_c),
+										'surprise': 1.5 * smile_c,
+									}
+									shared_data['ema_emotions'], _ = smooth_emotions_ema(heuristic, shared_data.get('ema_emotions', {}), alpha=shared_data.get('ema_alpha', 0.35))
+									max_emotion = max(shared_data['ema_emotions'], key=shared_data['ema_emotions'].get)
+									shared_data['emotions'] = shared_data['ema_emotions']
+									shared_data['dominant_emotion'] = f"{max_emotion} (heuristic)"
 									shared_data['face_region'] = region
 						else:
 							with data_lock:
