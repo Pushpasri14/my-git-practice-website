@@ -114,14 +114,16 @@ def api_last_state():
 
 @app.get("/api/file")
 def api_file(path: str, download: bool = False):
-	# Serve a file only if it resides under the project directory
-	if not _is_under_base(path):
+	# Decode URL-encoded path and serve only within project directory
+	from urllib.parse import unquote
+	decoded = unquote(path)
+	if not _is_under_base(decoded):
 		raise HTTPException(status_code=400, detail="invalid path")
-	if not os.path.exists(path):
+	if not os.path.exists(decoded):
 		raise HTTPException(status_code=404, detail="file not found")
-	filename = os.path.basename(path)
+	filename = os.path.basename(decoded)
 	headers = {"Content-Disposition": f"attachment; filename={filename}"} if download else None
-	return FileResponse(path, headers=headers)
+	return FileResponse(decoded, headers=headers)
 
 
 @app.get("/api/list_screenshots")
