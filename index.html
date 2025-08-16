@@ -1,11 +1,57 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>Git and Git Hub Learning </title>
-  <link rel="stylesheet" href="style.css">
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Video Analysis Dashboard</title>
+  <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-  <h1>Hello pushpa this is kiran!</h1>
-  <h2>This is KPSB</h2>
+  <div class="container">
+    <h1>Video Multimodal Analysis</h1>
+
+    <form id="uploadForm">
+      <label for="user">User</label>
+      <input id="user" name="user" type="text" value="User" required />
+
+      <label for="video">Select Video</label>
+      <input id="video" name="file" type="file" accept="video/*" required />
+
+      <button type="submit">Start Analysis</button>
+    </form>
+
+    <div id="session" class="hidden">
+      <div class="row">
+        <div>
+          <h2>Status</h2>
+          <div id="status">waiting</div>
+          <div id="progress"></div>
+        </div>
+        <div>
+          <h2>Primary Emotion</h2>
+          <div id="dominantEmotion">-</div>
+          <div id="emotionBars"></div>
+        </div>
+        <div>
+          <h2>Gaze</h2>
+          <div id="gaze">-</div>
+          <div id="eyeTurns">Eye Turns: 0</div>
+          <div id="smile">Smile: 0.00</div>
+        </div>
+      </div>
+
+      <h2>Outputs</h2>
+      <div id="outputs">
+        <div id="logLink"></div>
+        <div id="summaryLink"></div>
+        <div id="videoLink"></div>
+      </div>
+
+      <h3>Screenshots</h3>
+      <div id="screenshots" class="grid"></div>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
 </body>
 </html>
