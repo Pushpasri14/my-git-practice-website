@@ -7,50 +7,107 @@
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-  <div class="container">
-    <h1>Video Multimodal Analysis</h1>
-
-    <form id="uploadForm">
-      <label for="user">User</label>
-      <input id="user" name="user" type="text" value="User" required />
-
-      <label for="video">Select Video</label>
-      <input id="video" name="file" type="file" accept="video/*" required />
-
-      <button type="submit">Start Analysis</button>
-    </form>
-
-    <div id="session" class="hidden">
-      <div class="row">
-        <div>
-          <h2>Status</h2>
-          <div id="status">waiting</div>
-          <div id="progress"></div>
-        </div>
-        <div>
-          <h2>Primary Emotion</h2>
-          <div id="dominantEmotion">-</div>
-          <div id="emotionBars"></div>
-        </div>
-        <div>
-          <h2>Gaze</h2>
-          <div id="gaze">-</div>
-          <div id="eyeTurns">Eye Turns: 0</div>
-          <div id="smile">Smile: 0.00</div>
+  <header class="site-header">
+    <div class="container header-inner">
+      <div class="brand">
+        <div class="logo">VA</div>
+        <div class="brand-text">
+          <div class="title">Video Analyzer</div>
+          <div class="subtitle">Multimodal Insights</div>
         </div>
       </div>
-
-      <h2>Outputs</h2>
-      <div id="outputs">
-        <div id="logLink"></div>
-        <div id="summaryLink"></div>
-        <div id="videoLink"></div>
-      </div>
-
-      <h3>Screenshots</h3>
-      <div id="screenshots" class="grid"></div>
+      <nav class="actions">
+        <a class="btn btn-ghost" href="#gallery">Screenshots</a>
+        <a class="btn btn-ghost" href="#outputs">Outputs</a>
+      </nav>
     </div>
-  </div>
+  </header>
+
+  <main class="container">
+    <section class="grid grid-2-1 gap-xl">
+      <div class="card">
+        <div class="card-header">
+          <h2>Start New Analysis</h2>
+          <span id="statusPill" class="badge">idle</span>
+        </div>
+        <form id="uploadForm" class="form-grid">
+          <div class="form-field">
+            <label for="user">User</label>
+            <input id="user" name="user" type="text" placeholder="Enter user name" value="User" required />
+          </div>
+          <div class="form-field">
+            <label for="video">Select Video</label>
+            <input id="video" name="file" type="file" accept="video/*" required />
+          </div>
+          <div class="form-actions">
+            <button id="startBtn" type="submit" class="btn btn-primary">Start Analysis</button>
+          </div>
+        </form>
+        <div class="hint">Tip: Keep the page open while analysis runs. Status and metrics will update live.</div>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <h2>Live Status</h2>
+          <div class="time" id="timeRange">--:--</div>
+        </div>
+        <div class="stats">
+          <div class="stat">
+            <div class="label">Primary Emotion</div>
+            <div class="value accent" id="dominantEmotion">-</div>
+          </div>
+          <div class="stat">
+            <div class="label">Gaze</div>
+            <div class="value" id="gaze">-</div>
+          </div>
+          <div class="stat">
+            <div class="label">Eye Turns</div>
+            <div class="value" id="eyeTurns">0</div>
+          </div>
+          <div class="stat">
+            <div class="label">Smile</div>
+            <div class="value" id="smile">0.00</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="grid gap-xl">
+      <div class="card">
+        <div class="card-header">
+          <h2>Emotion Breakdown</h2>
+        </div>
+        <div id="emotionBars" class="bars"></div>
+      </div>
+    </section>
+
+    <section id="outputs" class="grid grid-2-1 gap-xl">
+      <div class="card">
+        <div class="card-header">
+          <h2>Outputs</h2>
+        </div>
+        <div class="outputs">
+          <div id="logLink"></div>
+          <div id="videoLink"></div>
+        </div>
+        <div class="video-preview">
+          <video id="previewVideo" controls playsinline></video>
+        </div>
+      </div>
+
+      <div id="gallery" class="card">
+        <div class="card-header">
+          <h2>Screenshots</h2>
+          <button id="refreshShots" class="btn btn-ghost small">Refresh</button>
+        </div>
+        <div id="screenshots" class="gallery"></div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="container muted">© <span id="year"></span> Video Analyzer</div>
+  </footer>
 
   <script src="/static/app.js"></script>
 </body>
