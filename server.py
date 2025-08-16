@@ -11,7 +11,7 @@ from urllib.parse import quote
 
 from backend_analysis import run_analysis, shared_data, data_lock, LOG_FOLDER, SCREENSHOT_FOLDER
 
-app = FastAPI(title="Video Multimodal Analysis API")
+app = FastAPI(title="Nuerascan AI - Video Multimodal Analysis API")
 
 app.add_middleware(
 	CORSMiddleware,
