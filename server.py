@@ -26,8 +26,12 @@ base_dir = os.path.dirname(os.path.abspath(__file__))
 static_root = base_dir
 if os.path.isdir(static_root):
 	app.mount("/static", StaticFiles(directory=static_root), name="static")
-from backend_analysis import LOG_DIR as LOG_DIR_RESOLVED
-from backend_analysis import SCREENSHOT_DIR as SCREENSHOT_DIR_RESOLVED
+try:
+	from backend_analysis import LOG_DIR as LOG_DIR_RESOLVED
+	from backend_analysis import SCREENSHOT_DIR as SCREENSHOT_DIR_RESOLVED
+except Exception:
+	LOG_DIR_RESOLVED = os.path.join(base_dir, LOG_FOLDER)
+	SCREENSHOT_DIR_RESOLVED = os.path.join(base_dir, SCREENSHOT_FOLDER)
 
 logs_dir = LOG_DIR_RESOLVED
 screens_dir = SCREENSHOT_DIR_RESOLVED
@@ -173,7 +177,7 @@ def api_session_paths(session_id: str):
 		raise HTTPException(status_code=404, detail="session not found")
 	user = s.get('user', 'User')
 	safe = _sanitize_user(user)
-	screenshots_folder = os.path.join(base_dir, SCREENSHOT_FOLDER, safe)
+	screenshots_folder = os.path.join(SCREENSHOT_DIR_RESOLVED, safe)
 	return { 'screenshots_folder': screenshots_folder }
 
 
