@@ -9,6 +9,8 @@ from fastapi.staticfiles import StaticFiles
 import fnmatch
 from urllib.parse import quote
 
+import backend_analysis as ba
+
 from backend_analysis import run_analysis, shared_data, data_lock, LOG_FOLDER, SCREENSHOT_FOLDER
 
 app = FastAPI(title="Nuerascan AI - Video Multimodal Analysis API")
@@ -156,15 +158,16 @@ def api_list_screenshots_by_session(session_id: str, pattern: str = "eye_turn_*.
 	s = sessions.get(session_id)
 	if not s:
 		raise HTTPException(status_code=404, detail="session not found")
-	user = s.get('user', 'User')
-	safe = _sanitize_user(user)
-	folder = os.path.join(SCREENSHOT_DIR_RESOLVED, safe)
-	if not os.path.isdir(folder):
+	# prefer outputs (stable), fall back to backend current session folder
+	folder = None
+	outputs = s.get('outputs') or {}
+	if outputs and outputs.get('screenshots_folder'):
+		folder = outputs['screenshots_folder']
+	elif getattr(ba, 'USER_SCREENSHOT_FOLDER', None):
+		folder = ba.USER_SCREENSHOT_FOLDER
+	if not folder or not os.path.isdir(folder):
 		return { 'files': [] }
-	names = []
-	for name in os.listdir(folder):
-		if fnmatch.fnmatch(name, pattern):
-			names.append(name)
+	names = [n for n in os.listdir(folder) if fnmatch.fnmatch(n, pattern)]
 	names.sort(reverse=True)
 	names = names[:max(1, min(100, limit))]
 	return { 'files': [f"/api/file?path={quote(os.path.join(folder, n))}" for n in names] }
@@ -175,10 +178,9 @@ def api_session_paths(session_id: str):
 	s = sessions.get(session_id)
 	if not s:
 		raise HTTPException(status_code=404, detail="session not found")
-	user = s.get('user', 'User')
-	safe = _sanitize_user(user)
-	screenshots_folder = os.path.join(SCREENSHOT_DIR_RESOLVED, safe)
-	return { 'screenshots_folder': screenshots_folder }
+	outputs = s.get('outputs') or {}
+	screenshots_folder = outputs.get('screenshots_folder') or getattr(ba, 'USER_SCREENSHOT_FOLDER', None)
+	return { 'screenshots_folder': screenshots_folder or '' }
 
 
 @app.get("/")
