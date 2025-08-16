@@ -42,7 +42,7 @@ button:hover { filter: brightness(1.1); }
 
 html, body { height: 100%; }
 body {
-  background: radial-gradient(1200px 600px at -10% -10%, #0e1330 0%, #060a1a 60%), var(--bg);
+  background: linear-gradient(180deg, #0e1330 0%, #060a1a 100%);
   color: var(--text);
 }
 
