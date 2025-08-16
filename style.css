@@ -1,7 +1,7 @@
 body {
   background: #0f172a;
   color: #e2e8f0;
-  font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Helvetica Neue, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+  font-family: 'Poppins', ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Helvetica Neue, Arial, "Apple Color Emoji", "Segoe UI Emoji";
   margin: 0;
 }
 .container {
@@ -60,6 +60,15 @@ body {
 .brand-text .title { font-size: 18px; font-weight: 800; letter-spacing: 0.3px; }
 .brand-text .subtitle { font-size: 12px; color: var(--muted); }
 .actions { display: flex; gap: 8px; }
+
+/* Wordmark gradient */
+.brand-text .title {
+  background: linear-gradient(90deg, #7dd3fc, #22c55e);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.site-header .subtitle { letter-spacing: 0.3px; }
 
 .container { max-width: 1200px; margin: 0 auto; padding: 24px; }
 .grid { display: grid; }
