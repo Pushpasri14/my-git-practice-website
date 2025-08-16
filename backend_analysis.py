@@ -647,7 +647,7 @@ def run_analysis(user_name: str, video_path: str, on_update: Optional[Callable[[
 	video_process(user_name, video_path, on_update=on_update, headless=True)
 	cleanup_and_finalize(user_name)
 	return {
-		'log_file': LOG_FILE,
-		'analyzed_video': ANALYZED_VIDEO_PATH,
-		'screenshots_folder': USER_SCREENSHOT_FOLDER,
+		'log_file': os.path.abspath(LOG_FILE) if LOG_FILE else None,
+		'analyzed_video': os.path.abspath(ANALYZED_VIDEO_PATH) if ANALYZED_VIDEO_PATH else None,
+		'screenshots_folder': os.path.abspath(USER_SCREENSHOT_FOLDER) if USER_SCREENSHOT_FOLDER else None,
 	}

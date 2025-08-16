@@ -64,7 +64,7 @@ function renderStatus(data) {
 	if (data.outputs) {
 		const { log_file, analyzed_video, screenshots_folder } = data.outputs;
 		logLinkEl.innerHTML = log_file ? `<a href="/api/file?path=${encodeURIComponent(log_file)}" target="_blank">Download Log</a>` : '';
-		videoLinkEl.innerHTML = analyzed_video ? `<a href="/api/file?path=${encodeURIComponent(analyzed_video)}" target="_blank">Download Analyzed Video</a>` : '';
+		videoLinkEl.innerHTML = analyzed_video ? `<a href="/api/file?path=${encodeURIComponent(analyzed_video)}&download=true" target="_blank">Download Analyzed Video</a>` : '';
 		if (screenshots_folder) {
 			refreshScreenshots(screenshots_folder);
 		}

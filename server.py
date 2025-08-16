@@ -88,13 +88,15 @@ def api_last_state():
 
 
 @app.get("/api/file")
-def api_file(path: str):
-	# Serve any file by absolute path under /workspace
-	if not path.startswith("/workspace/"):
+def api_file(path: str, download: bool = False):
+	# Serve a file only if it resides under the project directory
+	if not _is_under_base(path):
 		raise HTTPException(status_code=400, detail="invalid path")
 	if not os.path.exists(path):
 		raise HTTPException(status_code=404, detail="file not found")
-	return FileResponse(path)
+	filename = os.path.basename(path)
+	headers = {"Content-Disposition": f"attachment; filename={filename}"} if download else None
+	return FileResponse(path, headers=headers)
 
 
 @app.get("/api/list_screenshots")
