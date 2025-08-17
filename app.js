@@ -59,6 +59,7 @@ function setPill(status) {
 	else if (status === 'idle') statusPill.classList.add('idle');
 	else if (status === 'completed') statusPill.classList.add('done');
 	else if (status === 'error') statusPill.classList.add('error');
+	if (status === 'running' && errorBox) errorBox.textContent = 'Processing… this may take a while depending on video length.';
 }
 
 // Guarded form listener to avoid runtime errors if element missing

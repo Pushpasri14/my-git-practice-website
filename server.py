@@ -122,7 +122,7 @@ def api_status(session_id: str):
 	s = sessions.get(session_id)
 	if not s:
 		raise HTTPException(status_code=404, detail="session not found")
-	resp = { 'status': s['status'], 'user': s['user'], 'video': s['video'], 'state': s.get('state', {}), 'outputs': s.get('outputs', {}) }
+	resp = { 'status': s['status'], 'user': s['user'], 'video': s['video'], 'state': s.get('state', {}), 'outputs': s.get('outputs', {}), 'error': s.get('error') }
 	return JSONResponse(resp)
 
 
