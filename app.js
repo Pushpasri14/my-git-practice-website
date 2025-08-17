@@ -16,6 +16,7 @@ const previewVideo = document.getElementById('previewVideo');
 const refreshShotsBtn = document.getElementById('refreshShots');
 const screenshotsEl = document.getElementById('screenshots');
 const themeToggle = document.getElementById('themeToggle');
+const errorBox = document.getElementById('errorBox');
 
 let sessionId = null;
 let pollTimer = null;
@@ -62,17 +63,32 @@ function setPill(status) {
 
 form.addEventListener('submit', async (e) => {
 	e.preventDefault();
+	if (errorBox) errorBox.textContent = '';
 	const fd = new FormData();
 	fd.append('user', document.getElementById('user').value || 'User');
 	const file = document.getElementById('video').files[0];
-	if (!file) return;
+	if (!file) { if (errorBox) errorBox.textContent = 'Please choose a video file.'; return; }
 	fd.append('file', file);
 	startBtn.disabled = true;
 	setPill('running');
-	const res = await fetch('/api/analyze', { method: 'POST', body: fd });
+	let res;
+	try {
+		res = await fetch('/api/analyze', { method: 'POST', body: fd });
+	} catch (err) {
+		setPill('error');
+		startBtn.disabled = false;
+		if (errorBox) errorBox.textContent = 'Network error while starting analysis.';
+		return;
+	}
 	if (!res.ok) {
 		setPill('error');
 		startBtn.disabled = false;
+		try {
+			const j = await res.json();
+			if (errorBox) errorBox.textContent = j.detail || 'Unable to start analysis.';
+		} catch {
+			if (errorBox) errorBox.textContent = 'Unable to start analysis.';
+		}
 		return;
 	}
 	const data = await res.json();

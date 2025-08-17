@@ -83,23 +83,28 @@ def analysis_thread(session_id: str, user_name: str, video_path: str):
 
 @app.post("/api/analyze")
 def api_analyze(file: UploadFile = File(...), user: str = Form("User")):
+	if file is None:
+		raise HTTPException(status_code=400, detail="No file provided")
 	if file.content_type and not file.content_type.startswith('video'):
 		raise HTTPException(status_code=400, detail="Please upload a video file")
-	session_id = str(uuid.uuid4())
-	filename = f"{session_id}_{file.filename}"
-	save_path = os.path.join(UPLOAD_DIR, filename)
-	with open(save_path, 'wb') as f:
-		f.write(file.file.read())
-	sessions[session_id] = {
-		'status': 'running',
-		'user': user,
-		'video': save_path,
-		'state': {},
-		'outputs': {},
-	}
-	thr = threading.Thread(target=analysis_thread, args=(session_id, user, save_path), daemon=True)
-	thr.start()
-	return { 'session_id': session_id }
+	try:
+		session_id = str(uuid.uuid4())
+		filename = f"{session_id}_{file.filename}"
+		save_path = os.path.join(UPLOAD_DIR, filename)
+		with open(save_path, 'wb') as f:
+			f.write(file.file.read())
+		sessions[session_id] = {
+			'status': 'running',
+			'user': user,
+			'video': save_path,
+			'state': {},
+			'outputs': {},
+		}
+		thr = threading.Thread(target=analysis_thread, args=(session_id, user, save_path), daemon=True)
+		thr.start()
+		return { 'session_id': session_id }
+	except Exception as e:
+		raise HTTPException(status_code=500, detail=f"Failed to start analysis: {str(e)}")
 
 
 @app.get("/api/status/{session_id}")
