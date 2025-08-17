@@ -85,8 +85,18 @@ def analysis_thread(session_id: str, user_name: str, video_path: str):
 def api_analyze(file: UploadFile = File(...), user: str = Form("User")):
 	if file is None:
 		raise HTTPException(status_code=400, detail="No file provided")
-	if file.content_type and not file.content_type.startswith('video'):
-		raise HTTPException(status_code=400, detail="Please upload a video file")
+	# accept if declared as video/* or extension suggests a video
+	ok = False
+	try:
+		if file.content_type and file.content_type.startswith('video'):
+			ok = True
+		else:
+			ext = os.path.splitext(file.filename or '')[1].lower()
+			ok = ext in {'.mp4', '.mov', '.avi', '.mkv', '.webm', '.m4v'}
+	except Exception:
+		ok = False
+	if not ok:
+		raise HTTPException(status_code=400, detail="Unsupported file type. Please upload a video file (mp4, mov, avi, mkv, webm, m4v)")
 	try:
 		session_id = str(uuid.uuid4())
 		filename = f"{session_id}_{file.filename}"

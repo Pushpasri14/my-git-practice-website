@@ -61,7 +61,8 @@ function setPill(status) {
 	else if (status === 'error') statusPill.classList.add('error');
 }
 
-form.addEventListener('submit', async (e) => {
+// Guarded form listener to avoid runtime errors if element missing
+if (form) form.addEventListener('submit', async (e) => {
 	e.preventDefault();
 	if (errorBox) errorBox.textContent = '';
 	const fd = new FormData();
@@ -123,6 +124,9 @@ function startPolling() {
 
 async function renderStatus(data) {
 	setPill(data.status);
+	if (data.status === 'error' && errorBox) {
+		errorBox.textContent = data.error || 'Analysis failed.';
+	}
 	if (data.state) {
 		const s = data.state;
 		domEmotionEl.textContent = s.dominant_emotion || '-';
