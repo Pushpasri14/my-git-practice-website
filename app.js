@@ -21,6 +21,9 @@ const errorBox = document.getElementById('errorBox');
 let sessionId = null;
 let pollTimer = null;
 
+// Minimal debug flag
+let __loggedFirstStatus = false;
+
 (function initTheme() {
 	const root = document.documentElement;
 	const media = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)');
@@ -94,6 +97,7 @@ if (form) form.addEventListener('submit', async (e) => {
 		return;
 	}
 	const data = await res.json();
+	try { console.log('analyze ok, session:', data.session_id); } catch {}
 	sessionId = data.session_id;
 	startPolling();
 });
@@ -109,13 +113,16 @@ function startPolling() {
 			clearInterval(pollTimer);
 			setPill('idle');
 			sessionId = null;
+			if (startBtn) startBtn.disabled = false;
 			return;
 		}
 		if (!res.ok) return;
 		const data = await res.json();
+		if (!__loggedFirstStatus) { try { console.log('status:', data); } catch {} __loggedFirstStatus = true; }
 		renderStatus(data);
 		if (data.status === 'completed' || data.status === 'error') {
 			clearInterval(pollTimer);
+			if (startBtn) startBtn.disabled = false;
 		}
 		if (data.status === 'running') {
 			refreshScreenshots('');
