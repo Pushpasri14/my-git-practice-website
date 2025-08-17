@@ -83,23 +83,38 @@ def analysis_thread(session_id: str, user_name: str, video_path: str):
 
 @app.post("/api/analyze")
 def api_analyze(file: UploadFile = File(...), user: str = Form("User")):
-	if file.content_type and not file.content_type.startswith('video'):
-		raise HTTPException(status_code=400, detail="Please upload a video file")
-	session_id = str(uuid.uuid4())
-	filename = f"{session_id}_{file.filename}"
-	save_path = os.path.join(UPLOAD_DIR, filename)
-	with open(save_path, 'wb') as f:
-		f.write(file.file.read())
-	sessions[session_id] = {
-		'status': 'running',
-		'user': user,
-		'video': save_path,
-		'state': {},
-		'outputs': {},
-	}
-	thr = threading.Thread(target=analysis_thread, args=(session_id, user, save_path), daemon=True)
-	thr.start()
-	return { 'session_id': session_id }
+	if file is None:
+		raise HTTPException(status_code=400, detail="No file provided")
+	# accept if declared as video/* or extension suggests a video
+	ok = False
+	try:
+		if file.content_type and file.content_type.startswith('video'):
+			ok = True
+		else:
+			ext = os.path.splitext(file.filename or '')[1].lower()
+			ok = ext in {'.mp4', '.mov', '.avi', '.mkv', '.webm', '.m4v'}
+	except Exception:
+		ok = False
+	if not ok:
+		raise HTTPException(status_code=400, detail="Unsupported file type. Please upload a video file (mp4, mov, avi, mkv, webm, m4v)")
+	try:
+		session_id = str(uuid.uuid4())
+		filename = f"{session_id}_{file.filename}"
+		save_path = os.path.join(UPLOAD_DIR, filename)
+		with open(save_path, 'wb') as f:
+			f.write(file.file.read())
+		sessions[session_id] = {
+			'status': 'running',
+			'user': user,
+			'video': save_path,
+			'state': {},
+			'outputs': {},
+		}
+		thr = threading.Thread(target=analysis_thread, args=(session_id, user, save_path), daemon=True)
+		thr.start()
+		return { 'session_id': session_id }
+	except Exception as e:
+		raise HTTPException(status_code=500, detail=f"Failed to start analysis: {str(e)}")
 
 
 @app.get("/api/status/{session_id}")
@@ -107,7 +122,7 @@ def api_status(session_id: str):
 	s = sessions.get(session_id)
 	if not s:
 		raise HTTPException(status_code=404, detail="session not found")
-	resp = { 'status': s['status'], 'user': s['user'], 'video': s['video'], 'state': s.get('state', {}), 'outputs': s.get('outputs', {}) }
+	resp = { 'status': s['status'], 'user': s['user'], 'video': s['video'], 'state': s.get('state', {}), 'outputs': s.get('outputs', {}), 'error': s.get('error') }
 	return JSONResponse(resp)
 
 

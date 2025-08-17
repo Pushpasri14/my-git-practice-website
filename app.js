@@ -15,9 +15,44 @@ const videoLinkEl = document.getElementById('videoLink');
 const previewVideo = document.getElementById('previewVideo');
 const refreshShotsBtn = document.getElementById('refreshShots');
 const screenshotsEl = document.getElementById('screenshots');
+const themeToggle = document.getElementById('themeToggle');
+const errorBox = document.getElementById('errorBox');
 
 let sessionId = null;
 let pollTimer = null;
+
+// Minimal debug flag
+let __loggedFirstStatus = false;
+
+(function initTheme() {
+	const root = document.documentElement;
+	const media = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)');
+	const stored = localStorage.getItem('theme');
+	function applyTheme(theme) {
+		if (theme === 'light') {
+			root.setAttribute('data-theme', 'light');
+			if (themeToggle) { themeToggle.textContent = 'Dark'; themeToggle.setAttribute('aria-pressed', 'true'); }
+		} else {
+			root.removeAttribute('data-theme');
+			if (themeToggle) { themeToggle.textContent = 'Light'; themeToggle.setAttribute('aria-pressed', 'false'); }
+		}
+		localStorage.setItem('theme', theme);
+	}
+	applyTheme(stored || (media && media.matches ? 'dark' : 'dark'));
+	if (themeToggle) {
+		themeToggle.addEventListener('click', () => {
+			const isLight = root.getAttribute('data-theme') === 'light';
+			applyTheme(isLight ? 'dark' : 'light');
+		});
+	}
+	if (media && media.addEventListener) {
+		media.addEventListener('change', (e) => {
+			if (!localStorage.getItem('theme')) {
+				applyTheme(e.matches ? 'dark' : 'light');
+			}
+		});
+	}
+})();
 
 function setPill(status) {
 	if (!statusPill) return;
@@ -27,24 +62,42 @@ function setPill(status) {
 	else if (status === 'idle') statusPill.classList.add('idle');
 	else if (status === 'completed') statusPill.classList.add('done');
 	else if (status === 'error') statusPill.classList.add('error');
+	if (status === 'running' && errorBox) errorBox.textContent = 'Processing… this may take a while depending on video length.';
 }
 
-form.addEventListener('submit', async (e) => {
+// Guarded form listener to avoid runtime errors if element missing
+if (form) form.addEventListener('submit', async (e) => {
 	e.preventDefault();
+	if (errorBox) errorBox.textContent = '';
 	const fd = new FormData();
 	fd.append('user', document.getElementById('user').value || 'User');
 	const file = document.getElementById('video').files[0];
-	if (!file) return;
+	if (!file) { if (errorBox) errorBox.textContent = 'Please choose a video file.'; return; }
 	fd.append('file', file);
 	startBtn.disabled = true;
 	setPill('running');
-	const res = await fetch('/api/analyze', { method: 'POST', body: fd });
+	let res;
+	try {
+		res = await fetch('/api/analyze', { method: 'POST', body: fd });
+	} catch (err) {
+		setPill('error');
+		startBtn.disabled = false;
+		if (errorBox) errorBox.textContent = 'Network error while starting analysis.';
+		return;
+	}
 	if (!res.ok) {
 		setPill('error');
 		startBtn.disabled = false;
+		try {
+			const j = await res.json();
+			if (errorBox) errorBox.textContent = j.detail || 'Unable to start analysis.';
+		} catch {
+			if (errorBox) errorBox.textContent = 'Unable to start analysis.';
+		}
 		return;
 	}
 	const data = await res.json();
+	try { console.log('analyze ok, session:', data.session_id); } catch {}
 	sessionId = data.session_id;
 	startPolling();
 });
@@ -60,13 +113,16 @@ function startPolling() {
 			clearInterval(pollTimer);
 			setPill('idle');
 			sessionId = null;
+			if (startBtn) startBtn.disabled = false;
 			return;
 		}
 		if (!res.ok) return;
 		const data = await res.json();
+		if (!__loggedFirstStatus) { try { console.log('status:', data); } catch {} __loggedFirstStatus = true; }
 		renderStatus(data);
 		if (data.status === 'completed' || data.status === 'error') {
 			clearInterval(pollTimer);
+			if (startBtn) startBtn.disabled = false;
 		}
 		if (data.status === 'running') {
 			refreshScreenshots('');
@@ -76,6 +132,9 @@ function startPolling() {
 
 async function renderStatus(data) {
 	setPill(data.status);
+	if (data.status === 'error' && errorBox) {
+		errorBox.textContent = data.error || 'Analysis failed.';
+	}
 	if (data.state) {
 		const s = data.state;
 		domEmotionEl.textContent = s.dominant_emotion || '-';
