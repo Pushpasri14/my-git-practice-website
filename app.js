@@ -15,9 +15,40 @@ const videoLinkEl = document.getElementById('videoLink');
 const previewVideo = document.getElementById('previewVideo');
 const refreshShotsBtn = document.getElementById('refreshShots');
 const screenshotsEl = document.getElementById('screenshots');
+const themeToggle = document.getElementById('themeToggle');
 
 let sessionId = null;
 let pollTimer = null;
+
+(function initTheme() {
+	const root = document.documentElement;
+	const media = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)');
+	const stored = localStorage.getItem('theme');
+	function applyTheme(theme) {
+		if (theme === 'light') {
+			root.setAttribute('data-theme', 'light');
+			if (themeToggle) { themeToggle.textContent = 'Dark'; themeToggle.setAttribute('aria-pressed', 'true'); }
+		} else {
+			root.removeAttribute('data-theme');
+			if (themeToggle) { themeToggle.textContent = 'Light'; themeToggle.setAttribute('aria-pressed', 'false'); }
+		}
+		localStorage.setItem('theme', theme);
+	}
+	applyTheme(stored || (media && media.matches ? 'dark' : 'dark'));
+	if (themeToggle) {
+		themeToggle.addEventListener('click', () => {
+			const isLight = root.getAttribute('data-theme') === 'light';
+			applyTheme(isLight ? 'dark' : 'light');
+		});
+	}
+	if (media && media.addEventListener) {
+		media.addEventListener('change', (e) => {
+			if (!localStorage.getItem('theme')) {
+				applyTheme(e.matches ? 'dark' : 'light');
+			}
+		});
+	}
+})();
 
 function setPill(status) {
 	if (!statusPill) return;
