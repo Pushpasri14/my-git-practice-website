@@ -3,6 +3,8 @@ const startBtn = document.getElementById('startBtn');
 const statusPill = document.getElementById('statusPill');
 const timeRange = document.getElementById('timeRange');
 const yearEl = document.getElementById('year');
+const errorBox = document.getElementById('errorBox');
+const themeToggle = document.getElementById('themeToggle');
 if (yearEl) yearEl.textContent = new Date().getFullYear();
 
 const domEmotionEl = document.getElementById('dominantEmotion');
@@ -21,32 +23,41 @@ let pollTimer = null;
 
 function setPill(status) {
 	if (!statusPill) return;
-	statusPill.classList.remove('running','idle','error','done');
+	statusPill.classList.remove('running','idle','error','done','completed');
 	statusPill.textContent = status;
 	if (status === 'running') statusPill.classList.add('running');
 	else if (status === 'idle') statusPill.classList.add('idle');
-	else if (status === 'completed') statusPill.classList.add('done');
+	else if (status === 'completed') statusPill.classList.add('completed');
 	else if (status === 'error') statusPill.classList.add('error');
 }
 
 form.addEventListener('submit', async (e) => {
 	e.preventDefault();
+	if (errorBox) { errorBox.textContent = ''; errorBox.style.display = 'none'; }
 	const fd = new FormData();
 	fd.append('user', document.getElementById('user').value || 'User');
 	const file = document.getElementById('video').files[0];
-	if (!file) return;
+	if (!file) {
+		if (errorBox) { errorBox.textContent = 'Please select a video file.'; errorBox.style.display = 'block'; }
+		return;
+	}
 	fd.append('file', file);
 	startBtn.disabled = true;
 	setPill('running');
-	const res = await fetch('/api/analyze', { method: 'POST', body: fd });
-	if (!res.ok) {
+	try {
+		const res = await fetch('/api/analyze', { method: 'POST', body: fd });
+		if (!res.ok) {
+			const txt = await res.text();
+			throw new Error(txt || `HTTP ${res.status}`);
+		}
+		const data = await res.json();
+		sessionId = data.session_id;
+		startPolling();
+	} catch (err) {
 		setPill('error');
 		startBtn.disabled = false;
-		return;
+		if (errorBox) { errorBox.textContent = `Error: ${err.message || err}`; errorBox.style.display = 'block'; }
 	}
-	const data = await res.json();
-	sessionId = data.session_id;
-	startPolling();
 });
 
 if (refreshShotsBtn) refreshShotsBtn.addEventListener('click', () => { if (sessionId) refreshScreenshots(''); });
@@ -87,8 +98,8 @@ async function renderStatus(data) {
 	}
 	if (data.outputs) {
 		const { log_file, analyzed_video, screenshots_folder } = data.outputs;
-		logLinkEl.innerHTML = log_file ? `<a href="/api/file?path=${encodeURIComponent(log_file)}" target="_blank">Download Log</a>` : '';
-		videoLinkEl.innerHTML = analyzed_video ? `<a href="/api/file?path=${encodeURIComponent(analyzed_video)}&download=true" target="_blank">Download Analyzed Video</a>` : '';
+		logLinkEl.innerHTML = log_file ? `<a href="/api/file?path=${encodeURIComponent(log_file)}" target="_blank">📄 Analysis Log</a>` : '';
+		videoLinkEl.innerHTML = analyzed_video ? `<a href="/api/file?path=${encodeURIComponent(analyzed_video)}&download=true" target="_blank">🎥 Analyzed Video</a>` : '';
 		if (analyzed_video && previewVideo) {
 			previewVideo.src = `/api/file?path=${encodeURIComponent(analyzed_video)}`;
 		}
@@ -109,13 +120,20 @@ async function renderStatus(data) {
 function renderEmotions(emotions) {
 	emotionBarsEl.innerHTML = '';
 	const entries = Object.entries(emotions).sort((a,b) => b[1]-a[1]).slice(0,7);
+	if (entries.length === 0) {
+		const empty = document.createElement('div');
+		empty.className = 'empty-state';
+		empty.textContent = 'No emotion data available';
+		emotionBarsEl.appendChild(empty);
+		return;
+	}
 	for (const [name, score] of entries) {
 		const row = document.createElement('div');
 		row.className = 'bar-row';
 		row.innerHTML = `
 			<div class="bar-label">${capitalize(name)}</div>
-			<div class="bar"><div class="bar-fill" style="width:${Math.min(100, score)}%"></div></div>
-			<div class="bar-val">${score.toFixed(1)}%</div>
+			<div class="bar"><div class="bar-fill" style="width:${Math.min(100, Math.max(0, Number(score) || 0))}%"></div></div>
+			<div class="bar-val">${(Number(score) || 0).toFixed(1)}%</div>
 		`;
 		emotionBarsEl.appendChild(row);
 	}
@@ -153,3 +171,20 @@ function formatTime(sec) {
 	return `${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
 }
 function capitalize(s) { return s ? s.charAt(0).toUpperCase() + s.slice(1) : s; }
+
+// Theme toggle
+if (themeToggle) {
+	let isLight = false;
+	themeToggle.addEventListener('click', () => {
+		isLight = !isLight;
+		if (isLight) {
+			document.documentElement.setAttribute('data-theme', 'light');
+			themeToggle.textContent = 'Dark';
+			themeToggle.setAttribute('aria-pressed', 'true');
+		} else {
+			document.documentElement.removeAttribute('data-theme');
+			themeToggle.textContent = 'Light';
+			themeToggle.setAttribute('aria-pressed', 'false');
+		}
+	});
+}
