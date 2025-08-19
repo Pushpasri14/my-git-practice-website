@@ -1,7 +1,7 @@
 import argparse
 import os
 import time
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -12,6 +12,11 @@ try:
     from inference import get_model as rf_get_model  # Roboflow Inference SDK
 except Exception:
     rf_get_model = None
+
+try:
+    from ultralytics import YOLO
+except Exception:
+    YOLO = None
 
 
 def nms_cv2(xyxy: np.ndarray, scores: np.ndarray, score_thresh: float = 0.05, iou_thresh: float = 0.5):
@@ -79,6 +84,8 @@ def parse_args():
     parser.add_argument("--rf-model-id", default="rf-detr-nano/1", help="Roboflow model id (workspace/model:version)")
     parser.add_argument("--rf-api-key", default=None, help="Roboflow API key (or set ROBOFLOW_API_KEY env)")
     parser.add_argument("--conf", type=float, default=0.35, help="Detection confidence threshold")
+    parser.add_argument("--device", default="cpu", help="Device for Ultralytics fallback (cpu or cuda:0)")
+    parser.add_argument("--fallback-yolo-model", default="rtdetr-n.pt", help="Ultralytics model for fallback")
 
     # SAHI slicing defaults tuned for person scale
     parser.add_argument("--slice-w", type=int, default=640, help="Slice width")
@@ -120,12 +127,34 @@ def build_roboflow_backend(model_id: str, api_key: Optional[str]):
     return infer
 
 
+def build_ultralytics_backend(model_path: str, device: str = "cpu"):
+    if YOLO is None:
+        raise RuntimeError("Ultralytics not installed. Run: pip install ultralytics")
+    model = YOLO(model_path)
+
+    def infer(image_bgr: np.ndarray, conf: float) -> sv.Detections:
+        results = model.predict(image_bgr, conf=conf, verbose=False, device=device)[0]
+        dets = sv.Detections.from_ultralytics(results)
+        return dets
+
+    return infer
+
+
 def main():
     args = parse_args()
+    backend_name = ""
 
-    infer_fn = build_roboflow_backend(args.rf_model_id, api_key=args.rf_api_key)
+    # Build Roboflow backend, with fallback to Ultralytics if unauthorized/missing
+    infer_fn = None
+    try:
+        infer_fn = build_roboflow_backend(args.rf_model_id, api_key=args.rf_api_key)
+        backend_name = f"Roboflow ({args.rf_model_id})"
+    except Exception as e:
+        print("[WARN] Falling back to Ultralytics due to Roboflow init error:", str(e))
+        infer_fn = build_ultralytics_backend(args.fallback_yolo_model, device=args.device)
+        backend_name = f"Ultralytics ({args.fallback_yolo_model})"
 
-    # SAHI slicer around Roboflow detector
+    # SAHI slicer around chosen detector
     slicer = sv.InferenceSlicer(
         callback=lambda img: infer_fn(img, conf=args.conf),
         slice_wh=(args.slice_w, args.slice_h),
@@ -155,7 +184,7 @@ def main():
     print("=" * 60)
     print(f"Video: {args.video}")
     print(f"Total frames: {total_frames}")
-    print(f"Model: {args.rf_model_id}")
+    print(f"Backend: {backend_name}")
     print(f"Confidence: {args.conf}")
     print(f"SAHI: slice=({args.slice_w}x{args.slice_h}), overlap=({args.overlap_w},{args.overlap_h})")
     print("Tracker: ByteTrack + identity merging")
