@@ -142,6 +142,13 @@ def parse_args():
     parser.add_argument("--show", action="store_true", help="Show live preview window")
     parser.add_argument("--save-report", default="unique_persons_report.txt", help="File to save detailed report")
 
+    # SAHI-style slicing (via supervision InferenceSlicer)
+    parser.add_argument("--sahi", action="store_true", help="Enable slicing to improve small/overlapping detections")
+    parser.add_argument("--slice-w", type=int, default=640, help="Slice width when --sahi is used")
+    parser.add_argument("--slice-h", type=int, default=640, help="Slice height when --sahi is used")
+    parser.add_argument("--overlap-w", type=float, default=0.20, help="Overlap width ratio for slicing")
+    parser.add_argument("--overlap-h", type=float, default=0.20, help="Overlap height ratio for slicing")
+
     # NMS params (post-processing safeguard)
     parser.add_argument("--nms-iou", type=float, default=0.5, help="NMS IoU threshold")
 
@@ -215,6 +222,8 @@ def main():
     print(f"Total frames: {total_frames}")
     print(f"Detection confidence: {args.conf}")
     print(f"NMS IoU: {args.nms_iou}")
+    if args.sahi:
+        print(f"SAHI slicing: slice=({args.slice_w}x{args.slice_h}), overlap=({args.overlap_w},{args.overlap_h})")
     print(f"Tracker: ByteTrack via supervision")
     print(f"{'='*50}\n")
 
@@ -223,6 +232,16 @@ def main():
 
     pbar = tqdm(total=max_frames, desc="Analyzing video for unique persons", unit="frame")
     t0 = time.time()
+
+    # Optional SAHI slicer
+    slicer = None
+    if args.sahi:
+        # Build a slicer around the selected backend
+        slicer = sv.InferenceSlicer(
+            callback=lambda img: infer_fn(img, conf=args.conf),
+            slice_wh=(args.slice_w, args.slice_h),
+            overlap_ratio_wh=(args.overlap_w, args.overlap_h),
+        )
 
     try:
         while True:
@@ -233,8 +252,11 @@ def main():
             if args.max_frames > 0 and processed > args.max_frames:
                 break
 
-            # Direct model inference on full frame (avoid slicing duplicates)
-            detections: sv.Detections = infer_fn(frame, conf=args.conf)
+            # Detection (with or without slicing)
+            if slicer is not None:
+                detections: sv.Detections = slicer(frame)
+            else:
+                detections: sv.Detections = infer_fn(frame, conf=args.conf)
 
             # Filter to person class id == 0 if class ids exist
             person_indices = []

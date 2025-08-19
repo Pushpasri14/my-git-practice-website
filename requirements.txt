@@ -10,3 +10,4 @@ starlette==0.37.2
 jinja2==3.1.4
 ultralytics==8.3.34
 supervision==0.22.0
+sahi==0.11.16
