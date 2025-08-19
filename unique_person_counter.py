@@ -2,7 +2,7 @@ import argparse
 import os
 import sys
 import time
-from typing import Optional, Dict, Set
+from typing import Optional, Dict, Set, List, Tuple
 
 import cv2
 import numpy as np
@@ -70,6 +70,52 @@ def nms_cv2(xyxy: np.ndarray, scores: np.ndarray, score_thresh: float = 0.05, io
     return [int(i) for i in idxs.flatten()]
 
 
+def extract_torso_feature(image_bgr: np.ndarray, bbox_xyxy: np.ndarray) -> np.ndarray:
+    """Extract a simple HSV color histogram from the torso region for appearance.
+    Uses middle-upper region (35%-85% of height) to emphasize clothing over background.
+    Returns a 48-dim vector (16 bins per H,S,V), L2-normalized.
+    """
+    x1, y1, x2, y2 = map(int, bbox_xyxy)
+    h_img, w_img = image_bgr.shape[:2]
+    x1 = max(0, min(w_img - 1, x1))
+    x2 = max(0, min(w_img - 1, x2))
+    y1 = max(0, min(h_img - 1, y1))
+    y2 = max(0, min(h_img - 1, y2))
+    if x2 <= x1 or y2 <= y1:
+        return np.zeros(48, dtype=np.float32)
+
+    height = y2 - y1
+    torso_top = y1 + int(0.35 * height)
+    torso_bottom = y1 + int(0.85 * height)
+    torso_bottom = max(torso_top + 4, min(y2, torso_bottom))
+    crop = image_bgr[torso_top:torso_bottom, x1:x2]
+    if crop.size == 0:
+        return np.zeros(48, dtype=np.float32)
+
+    try:
+        crop = cv2.resize(crop, (64, 64))
+        hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+        hist_h = cv2.calcHist([hsv], [0], None, [16], [0, 180])
+        hist_s = cv2.calcHist([hsv], [1], None, [16], [0, 256])
+        hist_v = cv2.calcHist([hsv], [2], None, [16], [0, 256])
+        cv2.normalize(hist_h, hist_h)
+        cv2.normalize(hist_s, hist_s)
+        cv2.normalize(hist_v, hist_v)
+        feat = np.concatenate([hist_h.flatten(), hist_s.flatten(), hist_v.flatten()]).astype(np.float32)
+        norm = np.linalg.norm(feat) + 1e-8
+        return feat / norm
+    except Exception:
+        return np.zeros(48, dtype=np.float32)
+
+
+def feature_similarity(f1: np.ndarray, f2: np.ndarray) -> float:
+    if f1.size == 0 or f2.size == 0:
+        return 0.0
+    if np.linalg.norm(f1) == 0 or np.linalg.norm(f2) == 0:
+        return 0.0
+    return float(np.dot(f1, f2) / (np.linalg.norm(f1) * np.linalg.norm(f2)))
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Count unique persons in entire video using robust tracking (ByteTrack) and per-frame NMS."
@@ -98,6 +144,24 @@ def parse_args():
 
     # NMS params (post-processing safeguard)
     parser.add_argument("--nms-iou", type=float, default=0.5, help="NMS IoU threshold")
+
+    # Filtering params
+    parser.add_argument("--min-box-area-frac", type=float, default=0.0008,
+                        help="Min bbox area as fraction of frame area to keep (filters tiny false positives)")
+    parser.add_argument("--min-track-frames", type=int, default=8,
+                        help="Minimum frames a track must appear to be counted")
+    parser.add_argument("--min-track-conf", type=float, default=0.35,
+                        help="Minimum average confidence for a track to be counted")
+
+    # Track merge params (appearance-based global merge)
+    parser.add_argument("--merge-sim-thresh", type=float, default=0.6,
+                        help="Cosine similarity threshold to merge tracks as the same identity")
+    parser.add_argument("--merge-max-gap", type=int, default=120,
+                        help="Max frame gap to enforce spatial continuity when merging")
+    parser.add_argument("--allow-overlap-frames", type=int, default=1,
+                        help="How many overlapping frames are allowed when merging two tracks")
+    parser.add_argument("--max-spatial-jump-ratio", type=float, default=2.0,
+                        help="Max center distance normalized by previous box diagonal when gap <= merge-max-gap")
 
     return parser.parse_args()
 
@@ -184,6 +248,18 @@ def main():
 
             detections = detections[person_indices] if person_indices else sv.Detections.empty()
 
+            # Filter tiny boxes by area fraction
+            if len(detections) > 0:
+                frame_area = float(width * height)
+                min_area = args.min_box_area_frac * frame_area
+                keep_idx = []
+                for i in range(len(detections)):
+                    x1, y1, x2, y2 = detections.xyxy[i]
+                    area = float(max(0.0, (x2 - x1))) * float(max(0.0, (y2 - y1)))
+                    if area >= min_area:
+                        keep_idx.append(i)
+                detections = detections[keep_idx] if keep_idx else sv.Detections.empty()
+
             # Extra NMS safeguard (Ultralytics already does NMS, but keep to fight occasional dupes)
             if len(detections) > 0 and detections.confidence is not None:
                 keep = nms_cv2(detections.xyxy, detections.confidence, score_thresh=0.0, iou_thresh=args.nms_iou)
@@ -205,12 +281,30 @@ def main():
                         "first_seen_frame": processed,
                         "last_seen_frame": processed,
                         "total_confidence": 0.0,
+                        "feature": np.zeros(48, dtype=np.float32),
+                        "feature_updates": 0,
+                        "first_bbox": None,
+                        "last_bbox": None,
                     }
                 track_stats[tid]["frames_seen"].add(processed)
                 track_stats[tid]["total_detections"] += 1
                 track_stats[tid]["last_seen_frame"] = processed
                 conf_i = float(tracked.confidence[i]) if tracked.confidence is not None else 1.0
                 track_stats[tid]["total_confidence"] += conf_i
+
+                # Update appearance feature and boundary bboxes
+                bbox = tracked.xyxy[i]
+                if track_stats[tid]["first_bbox"] is None:
+                    track_stats[tid]["first_bbox"] = bbox.copy()
+                track_stats[tid]["last_bbox"] = bbox.copy()
+                feat = extract_torso_feature(frame, bbox)
+                # EMA update to stabilize features
+                if track_stats[tid]["feature_updates"] == 0:
+                    track_stats[tid]["feature"] = feat
+                else:
+                    alpha = 0.1
+                    track_stats[tid]["feature"] = (1 - alpha) * track_stats[tid]["feature"] + alpha * feat
+                track_stats[tid]["feature_updates"] += 1
 
             # Prepare labels for annotation
             annotated = frame.copy()
@@ -252,7 +346,92 @@ def main():
 
     # Final analysis
     dt = time.time() - t0
-    unique_count = len(seen_track_ids)
+    
+    # Filter tracks by quality
+    qualified_tracks: List[Tuple[int, Dict]] = []
+    for tid, stats in track_stats.items():
+        avg_conf = stats["total_confidence"] / max(1, stats["total_detections"])
+        if len(stats["frames_seen"]) >= args.min_track_frames and avg_conf >= args.min_track_conf:
+            qualified_tracks.append((tid, stats))
+
+    # Merge tracks into identities using appearance and continuity constraints
+    identities: List[Dict] = []
+
+    def bbox_center_and_diag(bxyxy: np.ndarray) -> Tuple[float, float, float]:
+        x1, y1, x2, y2 = map(float, bxyxy)
+        cx = 0.5 * (x1 + x2)
+        cy = 0.5 * (y1 + y2)
+        diag = ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5
+        return cx, cy, max(1e-6, diag)
+
+    for tid, stats in sorted(qualified_tracks, key=lambda kv: (-kv[1]["total_detections"], kv[1]["first_seen_frame"])):
+        assigned = False
+        feat = stats["feature"]
+        first_f = stats["first_seen_frame"]
+        last_f = stats["last_seen_frame"]
+        f_bbox = stats["first_bbox"] if stats["first_bbox"] is not None else np.array([0, 0, 0, 0])
+        l_bbox = stats["last_bbox"] if stats["last_bbox"] is not None else np.array([0, 0, 0, 0])
+
+        for ident in identities:
+            # temporal overlap constraint
+            overlap = len(stats["frames_seen"].intersection(ident["frames_seen"]))
+            if overlap > args.allow_overlap_frames:
+                continue
+
+            # appearance similarity
+            sim = feature_similarity(feat, ident["feature"])
+            if sim < args.merge_sim_thresh:
+                continue
+
+            # spatial continuity if close in time
+            gap = 0
+            # two options: this track after identity or before
+            if first_f >= ident["last_frame"]:
+                gap = first_f - ident["last_frame"]
+                if gap <= args.merge_max_gap and ident["last_bbox"] is not None and stats["first_bbox"] is not None:
+                    cx1, cy1, d1 = bbox_center_and_diag(ident["last_bbox"]) 
+                    cx2, cy2, d2 = bbox_center_and_diag(f_bbox)
+                    dist = ((cx1 - cx2) ** 2 + (cy1 - cy2) ** 2) ** 0.5
+                    if dist / d1 > args.max_spatial_jump_ratio:
+                        continue
+            elif ident["first_frame"] >= last_f:
+                gap = ident["first_frame"] - last_f
+                if gap <= args.merge_max_gap and stats["last_bbox"] is not None and ident["first_bbox"] is not None:
+                    cx1, cy1, d1 = bbox_center_and_diag(l_bbox)
+                    cx2, cy2, d2 = bbox_center_and_diag(ident["first_bbox"])
+                    dist = ((cx1 - cx2) ** 2 + (cy1 - cy2) ** 2) ** 0.5
+                    if dist / d1 > args.max_spatial_jump_ratio:
+                        continue
+
+            # merge into identity
+            ident["member_track_ids"].add(tid)
+            ident["frames_seen"].update(stats["frames_seen"])
+            ident["total_detections"] += stats["total_detections"]
+            ident["total_confidence"] += stats["total_confidence"]
+            ident["feature"] = 0.5 * ident["feature"] + 0.5 * feat
+            ident["first_frame"] = min(ident["first_frame"], first_f)
+            ident["last_frame"] = max(ident["last_frame"], last_f)
+            if ident["first_frame"] == first_f and stats["first_bbox"] is not None:
+                ident["first_bbox"] = stats["first_bbox"]
+            if ident["last_frame"] == last_f and stats["last_bbox"] is not None:
+                ident["last_bbox"] = stats["last_bbox"]
+            assigned = True
+            break
+
+        if not assigned:
+            identities.append({
+                "member_track_ids": {tid},
+                "frames_seen": set(stats["frames_seen"]),
+                "total_detections": stats["total_detections"],
+                "total_confidence": stats["total_confidence"],
+                "feature": stats["feature"].copy(),
+                "first_frame": first_f,
+                "last_frame": last_f,
+                "first_bbox": f_bbox,
+                "last_bbox": l_bbox,
+            })
+
+    unique_count = len(identities)
 
     # Save detailed report
     with open(args.save_report, 'w', encoding='utf-8') as f:
@@ -265,17 +444,18 @@ def main():
         f.write("FINAL RESULTS:\n")
         f.write("-" * 30 + "\n")
         f.write(f"*** UNIQUE PERSONS IN ENTIRE VIDEO: {unique_count} ***\n\n")
-        f.write("CONFIRMED UNIQUE TRACKS DETAILS:\n")
+        f.write("IDENTITY GROUPS (MERGED TRACKS) DETAILS:\n")
         f.write("-" * 30 + "\n")
-        if track_stats:
-            for tid, details in sorted(track_stats.items()):
-                avg_conf = details["total_confidence"] / max(1, details["total_detections"])
-                f.write(f"Track ID {tid}:\n")
-                f.write(f"  - Total detections: {details['total_detections']}\n")
-                f.write(f"  - Frames appeared in: {len(details['frames_seen'])}\n")
+        if identities:
+            for idx, ident in enumerate(identities, start=1):
+                avg_conf = ident["total_confidence"] / max(1, ident["total_detections"])
+                f.write(f"Identity {idx}:\n")
+                f.write(f"  - Member tracks: {sorted(list(ident['member_track_ids']))}\n")
+                f.write(f"  - Total detections: {ident['total_detections']}\n")
+                f.write(f"  - Frames appeared in: {len(ident['frames_seen'])}\n")
                 f.write(f"  - Average confidence: {avg_conf:.3f}\n")
-                f.write(f"  - First seen: frame {details['first_seen_frame']}\n")
-                f.write(f"  - Last seen: frame {details['last_seen_frame']}\n\n")
+                f.write(f"  - First seen: frame {ident['first_frame']}\n")
+                f.write(f"  - Last seen: frame {ident['last_frame']}\n\n")
         else:
             f.write("No persons tracked.\n\n")
 
@@ -283,11 +463,11 @@ def main():
     print(f"\n" + "="*70)
     print(f"*** FINAL RESULT: {unique_count} UNIQUE PERSONS IN ENTIRE VIDEO ***")
     print(f"="*70)
-    if track_stats:
-        print(f"\n*** UNIQUE TRACKS SUMMARY ***")
-        for tid, details in sorted(track_stats.items()):
-            avg_conf = details["total_confidence"] / max(1, details["total_detections"])
-            print(f"ID {tid}: {len(details['frames_seen'])} frames, {details['total_detections']} detections, {avg_conf:.2f} avg conf")
+    if identities:
+        print(f"\n*** IDENTITIES SUMMARY (merged tracks) ***")
+        for idx, ident in enumerate(identities, start=1):
+            avg_conf = ident["total_confidence"] / max(1, ident["total_detections"])
+            print(f"Identity {idx}: tracks={sorted(list(ident['member_track_ids']))}, frames={len(ident['frames_seen'])}, dets={ident['total_detections']}, avg_conf={avg_conf:.2f}")
     else:
         print("No tracks found.")
 
