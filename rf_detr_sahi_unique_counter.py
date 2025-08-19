@@ -1,6 +1,8 @@
 import argparse
 import os
+import sys
 import time
+from getpass import getpass
 from typing import Dict, List, Optional, Tuple
 
 import cv2
@@ -83,6 +85,9 @@ def parse_args():
     parser.add_argument("--out", default="rf_detr_sahi_unique_out.mp4", help="Annotated video output path")
     parser.add_argument("--rf-model-id", default="rf-detr-nano/1", help="Roboflow model id (workspace/model:version)")
     parser.add_argument("--rf-api-key", default=None, help="Roboflow API key (or set ROBOFLOW_API_KEY env)")
+    parser.add_argument("--persist-key", action="store_true", help="Persist provided/entered API key for future runs")
+    parser.add_argument("--key-store", choices=["home", "cwd"], default="home", help="Where to persist key if enabled")
+    parser.add_argument("--no-prompt", action="store_true", help="Do not prompt for API key if missing/unauthorized")
     parser.add_argument("--conf", type=float, default=0.35, help="Detection confidence threshold")
     parser.add_argument("--device", default="cpu", help="Device for Ultralytics fallback (cpu or cuda:0)")
     parser.add_argument("--fallback-yolo-model", default="rtdetr-n.pt", help="Ultralytics model for fallback")
@@ -140,19 +145,94 @@ def build_ultralytics_backend(model_path: str, device: str = "cpu"):
     return infer
 
 
+def resolve_api_key(cli_key: Optional[str], persist: bool, key_store: str) -> Optional[str]:
+    """Resolve Roboflow API key from CLI, env, or saved file. Optionally persist the key."""
+    # 1) CLI flag takes precedence
+    if cli_key and cli_key.strip():
+        key = cli_key.strip()
+        if persist:
+            save_api_key(key, key_store)
+        return key
+
+    # 2) Environment variable
+    key = os.environ.get("ROBOFLOW_API_KEY", "").strip()
+    if key:
+        if persist:
+            save_api_key(key, key_store)
+        return key
+
+    # 3) Saved file
+    key = load_saved_api_key()
+    if key:
+        return key
+
+    return None
+
+
+def saved_key_paths() -> Tuple[str, str]:
+    cwd_path = os.path.join(os.getcwd(), ".roboflow_api_key")
+    home_dir = os.path.expanduser("~")
+    home_path = os.path.join(home_dir, ".roboflow_api_key")
+    return cwd_path, home_path
+
+
+def load_saved_api_key() -> Optional[str]:
+    for path in saved_key_paths():
+        try:
+            if os.path.exists(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    key = f.read().strip()
+                    if key:
+                        return key
+        except Exception:
+            continue
+    return None
+
+
+def save_api_key(key: str, key_store: str = "home") -> None:
+    cwd_path, home_path = saved_key_paths()
+    dest = home_path if key_store == "home" else cwd_path
+    try:
+        with open(dest, "w", encoding="utf-8") as f:
+            f.write(key.strip())
+        print(f"[INFO] Saved Roboflow API key to {dest}")
+    except Exception as e:
+        print(f"[WARN] Failed to save API key to {dest}: {e}")
+
+
 def main():
     args = parse_args()
     backend_name = ""
 
-    # Build Roboflow backend, with fallback to Ultralytics if unauthorized/missing
+    # Resolve key (CLI -> env -> saved file)
+    resolved_key = resolve_api_key(args.rf_api_key, persist=args.persist_key, key_store=args.key_store)
+
+    # Build Roboflow backend, with prompt and fallback to Ultralytics if unauthorized/missing
     infer_fn = None
+    def try_build_rf(key: Optional[str]):
+        return build_roboflow_backend(args.rf_model_id, api_key=key)
+
+    # Attempt with resolved key
     try:
-        infer_fn = build_roboflow_backend(args.rf_model_id, api_key=args.rf_api_key)
+        infer_fn = try_build_rf(resolved_key)
         backend_name = f"Roboflow ({args.rf_model_id})"
     except Exception as e:
-        print("[WARN] Falling back to Ultralytics due to Roboflow init error:", str(e))
-        infer_fn = build_ultralytics_backend(args.fallback_yolo_model, device=args.device)
-        backend_name = f"Ultralytics ({args.fallback_yolo_model})"
+        unauthorized = ("Unauthorized" in str(e)) or ("NotAuthorized" in str(e)) or ("401" in str(e))
+        if unauthorized and (not args.no_prompt) and sys.stdin and sys.stdin.isatty():
+            print("[ERROR] Roboflow unauthorized. Please paste your API key (input hidden):")
+            entered = getpass("ROBOFLOW_API_KEY: ").strip()
+            if entered:
+                if args.persist_key:
+                    save_api_key(entered, args.key_store)
+                try:
+                    infer_fn = try_build_rf(entered)
+                    backend_name = f"Roboflow ({args.rf_model_id})"
+                except Exception as e2:
+                    print("[WARN] Roboflow still unavailable:", str(e2))
+        if infer_fn is None:
+            print("[WARN] Falling back to Ultralytics backend.")
+            infer_fn = build_ultralytics_backend(args.fallback_yolo_model, device=args.device)
+            backend_name = f"Ultralytics ({args.fallback_yolo_model})"
 
     # SAHI slicer around chosen detector
     slicer = sv.InferenceSlicer(
