@@ -1,7 +1,7 @@
 import argparse
 import os
 import time
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple, Union
 
 import cv2
 import numpy as np
@@ -49,7 +49,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Detect and count unique persons in a video using SAHI-style slicing and tracking."
     )
-    parser.add_argument("--video", required=True, help="Path to input video (e.g., input.mp4)")
+    parser.add_argument("--video", required=True, help="Path to input video (e.g., input.mp4) or camera index (e.g., 0)")
     parser.add_argument("--out", default="output_unique_persons.mp4", help="Output annotated video path")
 
     # Model/Backend
@@ -93,8 +93,13 @@ def main() -> None:
     # Tracker for assigning stable IDs across frames
     tracker = sv.ByteTrack()
 
-    # Open input video
-    cap = cv2.VideoCapture(args.video)
+    # Open input video or webcam
+    video_source: Union[str, int]
+    if isinstance(args.video, str) and args.video.isdigit():
+        video_source = int(args.video)
+    else:
+        video_source = args.video
+    cap = cv2.VideoCapture(video_source)
     if not cap.isOpened():
         raise FileNotFoundError(f"Could not open video: {args.video}")
 
