@@ -37,6 +37,7 @@ class PersonCounter:
 	- IoU-based deduplication between YOLO and SAHI detections
 	- Proper DeepSort detection tuple format
 	- Tuned minimal size filters to include small top-view humans
+	- Identity registry: merges fragmented track IDs into stable person IDs
 	"""
 
 	def __init__(self):
@@ -46,7 +47,11 @@ class PersonCounter:
 		self.track_area_history = defaultdict(list)
 		self.max_simultaneous_confirmed = 0
 		self.max_simultaneous_frame = 0
-		self.unique_person_ids = set()  # unique identities across entire video (by track id)
+
+		# Stable identity registry
+		self.stable_persons = {}  # stable_id -> {last_center, last_bbox, last_frame, track_ids:set}
+		self.stable_id_by_track = {}  # track_id -> stable_id
+		self.next_stable_id = 1
 
 		# Detection config
 		self.conf_threshold = 0.25  # direct YOLO
@@ -71,12 +76,28 @@ class PersonCounter:
 		# Deduplication
 		self.dup_iou_threshold = 0.5
 
+		# Identity matching thresholds
+		self.match_max_frame_gap = 90
+		self.match_iou_threshold = 0.3
+		self.match_center_dist_ratio = 0.75
+
 	@staticmethod
 	def _bbox_width_height_area(xyxy):
 		x1, y1, x2, y2 = xyxy
 		w = max(0.0, x2 - x1)
 		h = max(0.0, y2 - y1)
 		return w, h, w * h
+
+	@staticmethod
+	def _center_of_bbox(xyxy):
+		x1, y1, x2, y2 = xyxy
+		return ((x1 + x2) / 2.0, (y1 + y2) / 2.0)
+
+	@staticmethod
+	def _euclidean(p1, p2):
+		x1, y1 = p1
+		x2, y2 = p2
+		return float(((x1 - x2) ** 2 + (y1 - y2) ** 2) ** 0.5)
 
 	@staticmethod
 	def _iou(b1, b2):
@@ -170,6 +191,72 @@ class PersonCounter:
 				continue
 		return detections
 
+	def _update_identity_registry(self, tracks, frame_idx):
+		"""Merge current confirmed tracks into stable identities to prevent double-counting."""
+		visible_tracks = []
+		for t in tracks:
+			if not t.is_confirmed():
+				continue
+			# Only use recently updated tracks (time_since_update == 0) if attribute exists
+			if getattr(t, 'time_since_update', 0) != 0:
+				continue
+			bbox = t.to_ltrb()
+			center = self._center_of_bbox(bbox)
+			bw, bh, _ = self._bbox_width_height_area(bbox)
+			visible_tracks.append((t.track_id, bbox, center, max(bw, bh)))
+
+		# First, keep existing mapping if present
+		for track_id, bbox, center, scale in visible_tracks:
+			if track_id in self.stable_id_by_track:
+				stable_id = self.stable_id_by_track[track_id]
+				rec = self.stable_persons.get(stable_id)
+				if rec is not None:
+					rec['last_center'] = center
+					rec['last_bbox'] = bbox
+					rec['last_frame'] = frame_idx
+					rec['track_ids'].add(track_id)
+
+		# Try to associate unmapped tracks to existing stable persons
+		for track_id, bbox, center, scale in visible_tracks:
+			if track_id in self.stable_id_by_track:
+				continue
+			best_stable = None
+			best_score = -1.0
+			for stable_id, rec in self.stable_persons.items():
+				if frame_idx - rec['last_frame'] > self.match_max_frame_gap:
+					continue
+				iou = self._iou(bbox, rec['last_bbox']) if rec['last_bbox'] is not None else 0.0
+				dist = self._euclidean(center, rec['last_center']) if rec['last_center'] is not None else 1e9
+				allowed = self.match_center_dist_ratio * max(scale, 1.0)
+				# scoring: prefer IoU, fallback to distance
+				score = iou if iou >= self.match_iou_threshold else (-dist / max(allowed, 1.0))
+				if score > best_score:
+					best_score = score
+					best_stable = stable_id
+			# Accept if IoU is good or distance small enough
+			if best_stable is not None:
+				rec = self.stable_persons[best_stable]
+				iou = self._iou(bbox, rec['last_bbox']) if rec['last_bbox'] is not None else 0.0
+				dist = self._euclidean(center, rec['last_center']) if rec['last_center'] is not None else 1e9
+				allowed = self.match_center_dist_ratio * scale
+				if iou >= self.match_iou_threshold or dist <= allowed:
+					self.stable_id_by_track[track_id] = best_stable
+					rec['last_center'] = center
+					rec['last_bbox'] = bbox
+					rec['last_frame'] = frame_idx
+					rec['track_ids'].add(track_id)
+					continue
+			# Create new stable person
+			stable_id = self.next_stable_id
+			self.next_stable_id += 1
+			self.stable_persons[stable_id] = {
+				'last_center': center,
+				'last_bbox': bbox,
+				'last_frame': frame_idx,
+				'track_ids': {track_id},
+			}
+			self.stable_id_by_track[track_id] = stable_id
+
 	def process_frame(self, frame, yolo_model, tracker, frame_idx, sahi_model=None):
 		"""Run detection (YOLO + optional SAHI), deduplicate, track, and update stats."""
 		# 1) Direct YOLO detections
@@ -189,15 +276,16 @@ class PersonCounter:
 		for t in tracks:
 			if not t.is_confirmed():
 				continue
-			track_id = t.track_id
-			self.active_ids.add(track_id)
+			self.active_ids.add(t.track_id)
 			ltrb = t.to_ltrb()
 			_, _, ba = self._bbox_width_height_area(ltrb)
-			self.track_area_history[track_id].append(ba)
-			self.frames_seen[track_id] += 1
-			if self.frames_seen[track_id] >= self.min_track_length:
-				self.confirmed_ids.add(track_id)
-				self.unique_person_ids.add(track_id)
+			self.track_area_history[t.track_id].append(ba)
+			self.frames_seen[t.track_id] += 1
+			if self.frames_seen[t.track_id] >= self.min_track_length:
+				self.confirmed_ids.add(t.track_id)
+
+		# 6) Update identity registry after stats
+		self._update_identity_registry(tracks, frame_idx)
 
 		current_confirmed_active = len(self.confirmed_ids & self.active_ids)
 		if current_confirmed_active > self.max_simultaneous_confirmed:
@@ -217,22 +305,24 @@ class PersonCounter:
 			cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (255, 0, 255), 1)
 			cv2.putText(frame, f"S {conf:.2f}", (int(x1), int(y1) - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 0, 255), 1)
 
-		# Draw tracks (green for confirmed, orange for warming)
+		# Draw tracks (green for confirmed, orange for warming), label with stable ID
 		for t in tracks:
 			if not t.is_confirmed():
 				continue
 			track_id = t.track_id
 			x1, y1, x2, y2 = [int(v) for v in t.to_ltrb()]
 			is_confirmed = track_id in self.confirmed_ids
+			stable_id = self.stable_id_by_track.get(track_id, None)
 			color = (0, 200, 0) if is_confirmed else (0, 165, 255)
 			thickness = 3 if is_confirmed else 2
 			cv2.rectangle(frame, (x1, y1), (x2, y2), color, thickness)
-			cv2.putText(frame, f"ID {track_id}", (x1, y1 - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+			label = f"SID {stable_id} TID {track_id}" if stable_id is not None else f"TID {track_id}"
+			cv2.putText(frame, label, (x1, y1 - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
 
 		# Stats header
 		active_confirmed = len(self.confirmed_ids & self.active_ids)
 		cv2.putText(frame, f"CONFIRMED: {active_confirmed}  MAX: {self.max_simultaneous_confirmed}", (24, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2)
-		cv2.putText(frame, f"UNIQUE: {len(self.unique_person_ids)}", (24, 72), cv2.FONT_HERSHEY_SIMPLEX, 0.95, (0, 255, 255), 2)
+		cv2.putText(frame, f"UNIQUE: {len(self.stable_persons)}", (24, 72), cv2.FONT_HERSHEY_SIMPLEX, 0.95, (0, 255, 255), 2)
 		cv2.putText(frame, f"ACTIVE: {len(self.active_ids)}  DETS(Y/S/All): {len(yolo_dets)}/{len(sahi_dets)}/{len(all_dets)}", (24, 104), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2)
 		cv2.putText(frame, f"Frame: {frame_idx}/{total_frames}", (24, 136), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
 
@@ -329,7 +419,7 @@ def main():
 	elapsed = time.time() - start
 	print("\nProcessing done.")
 	print(f"Max simultaneous confirmed: {counter.max_simultaneous_confirmed} at frame {counter.max_simultaneous_frame}")
-	print(f"Unique persons (by confirmed tracks): {len(counter.unique_person_ids)}")
+	print(f"Unique persons (stable IDs): {len(counter.stable_persons)}")
 	print(f"Elapsed: {elapsed:.1f}s")
 
 
