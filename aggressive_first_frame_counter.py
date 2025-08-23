@@ -179,13 +179,13 @@ class AggressivePersonCounter:
         if current_active_confirmed > self.max_simultaneous_active:
             self.max_simultaneous_active = current_active_confirmed
             self.max_simultaneous_frame = frame_number
-            print(f"\ud83d\udd25 NEW MAXIMUM CONFIRMED: {self.max_simultaneous_active} simultaneous persons at frame {frame_number}")
+            print(f"NEW MAXIMUM CONFIRMED: {self.max_simultaneous_active} simultaneous persons at frame {frame_number}")
 
         current_active_tracks_count = len(self.active_tracks)
         if current_active_tracks_count > self.max_active_tracks:
             self.max_active_tracks = current_active_tracks_count
             self.max_active_tracks_frame = frame_number
-            print(f"\ud83d\udcc8 NEW MAXIMUM ACTIVE TRACKS: {self.max_active_tracks} total tracks at frame {frame_number}")
+            print(f"NEW MAXIMUM ACTIVE TRACKS: {self.max_active_tracks} total tracks at frame {frame_number}")
 
         return current_tracks
 
@@ -456,9 +456,9 @@ processing_time = end_time - start_time
 print(f"\n{'=' * 80}")
 print(f"AGGRESSIVE CROWDED SCENE COUNTING RESULTS")
 print(f"{'=' * 80}")
-print(f"\ud83c\udfaf MAXIMUM ACTIVE TRACKS: {person_counter.max_active_tracks}")
-print(f"\ud83d\udc65 MAXIMUM CONFIRMED PERSONS: {person_counter.max_simultaneous_active}")
-print(f"\ud83d\udcca Total confirmed persons: {len(person_counter.confirmed_persons)}")
-print(f"\uD83D\uDD0A UNIQUE PERSONS (first frame): {first_frame_unique_count if first_frame_unique_count is not None else 'N/A'}")
-print(f"\u26A1 Processing time: {processing_time:.1f}s")
-print(f"\ud83d\ude80 AGGRESSIVE MODE: Very low thresholds for maximum detection")
+print(f"MAXIMUM ACTIVE TRACKS: {person_counter.max_active_tracks}")
+print(f"MAXIMUM CONFIRMED PERSONS: {person_counter.max_simultaneous_active}")
+print(f"Total confirmed persons: {len(person_counter.confirmed_persons)}")
+print(f"UNIQUE PERSONS (first frame): {first_frame_unique_count if first_frame_unique_count is not None else 'N/A'}")
+print(f"Processing time: {processing_time:.1f}s")
+print(f"AGGRESSIVE MODE: Very low thresholds for maximum detection")
