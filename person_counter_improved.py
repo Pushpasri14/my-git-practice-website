@@ -54,32 +54,34 @@ class PersonCounter:
 		self.next_stable_id = 1
 
 		# Detection config
-		self.conf_threshold = 0.25  # direct YOLO
+		self.conf_threshold = 0.20  # direct YOLO, slightly lower for small/top-view
 		self.iou_threshold = 0.45   # NMS for YOLO
-		self.max_det = 400
-		self.imgsz = 960           # larger for better small-object recall
+		self.max_det = 600
+		self.imgsz = 1280          # larger for better small-object recall
 
 		# SAHI config (small + medium slices)
 		self.sahi_confs = [
-			{"slice_height": 256, "slice_width": 256, "overlap": 0.25, "conf": 0.15},
-			{"slice_height": 512, "slice_width": 512, "overlap": 0.30, "conf": 0.18},
+			{"slice_height": 192, "slice_width": 192, "overlap": 0.30, "conf": 0.12},
+			{"slice_height": 256, "slice_width": 256, "overlap": 0.30, "conf": 0.12},
+			{"slice_height": 384, "slice_width": 384, "overlap": 0.30, "conf": 0.14},
+			{"slice_height": 512, "slice_width": 512, "overlap": 0.30, "conf": 0.16},
 		]
 
 		# Size constraints to suppress obvious noise but keep small top-view humans
-		self.min_width = 6
-		self.min_height = 8
-		self.min_area = 64
+		self.min_width = 4
+		self.min_height = 6
+		self.min_area = 36
 
 		# Track confirmation
 		self.min_track_length = 3
 
 		# Deduplication
-		self.dup_iou_threshold = 0.5
+		self.dup_iou_threshold = 0.7
 
 		# Identity matching thresholds
 		self.match_max_frame_gap = 90
-		self.match_iou_threshold = 0.3
-		self.match_center_dist_ratio = 0.75
+		self.match_iou_threshold = 0.45
+		self.match_center_dist_ratio = 0.6
 
 	@staticmethod
 	def _bbox_width_height_area(xyxy):
@@ -192,70 +194,80 @@ class PersonCounter:
 		return detections
 
 	def _update_identity_registry(self, tracks, frame_idx):
-		"""Merge current confirmed tracks into stable identities to prevent double-counting."""
-		visible_tracks = []
+		"""One-to-one greedy assignment of tracks to existing stable IDs to avoid merges."""
+		# Build list of fresh, confirmed tracks
+		curr = []
 		for t in tracks:
 			if not t.is_confirmed():
 				continue
-			# Only use recently updated tracks (time_since_update == 0) if attribute exists
 			if getattr(t, 'time_since_update', 0) != 0:
 				continue
 			bbox = t.to_ltrb()
 			center = self._center_of_bbox(bbox)
 			bw, bh, _ = self._bbox_width_height_area(bbox)
-			visible_tracks.append((t.track_id, bbox, center, max(bw, bh)))
+			curr.append((t.track_id, bbox, center, max(bw, bh)))
 
-		# First, keep existing mapping if present
-		for track_id, bbox, center, scale in visible_tracks:
-			if track_id in self.stable_id_by_track:
-				stable_id = self.stable_id_by_track[track_id]
-				rec = self.stable_persons.get(stable_id)
+		# Prepare candidate stable ids that are recent
+		recent_stable = [sid for sid, rec in self.stable_persons.items() if frame_idx - rec['last_frame'] <= self.match_max_frame_gap]
+
+		# Score matrix: higher is better (IoU primary, distance secondary)
+		scores = []  # list of (score, track_idx, stable_id)
+		for i, (tid, bbox, center, scale) in enumerate(curr):
+			for sid in recent_stable:
+				rec = self.stable_persons[sid]
+				iou = self._iou(bbox, rec['last_bbox']) if rec['last_bbox'] is not None else 0.0
+				dist = self._euclidean(center, rec['last_center']) if rec['last_center'] is not None else 1e9
+				allowed = self.match_center_dist_ratio * max(scale, 1.0)
+				score = iou if iou >= self.match_iou_threshold else (-dist / max(allowed, 1.0))
+				scores.append((score, i, sid))
+
+		# Greedy assignment: sort by score desc and match at most one-to-one
+		scores.sort(key=lambda x: x[0], reverse=True)
+		assigned_tracks = set()
+		assigned_stable = set()
+		for score, i, sid in scores:
+			if i in assigned_tracks or sid in assigned_stable:
+				continue
+			if score <= 0 and score > -1e-6:
+				continue
+			# Check acceptance
+			tid, bbox, center, scale = curr[i]
+			rec = self.stable_persons[sid]
+			iou = self._iou(bbox, rec['last_bbox']) if rec['last_bbox'] is not None else 0.0
+			dist = self._euclidean(center, rec['last_center']) if rec['last_center'] is not None else 1e9
+			allowed = self.match_center_dist_ratio * scale
+			if iou >= self.match_iou_threshold or dist <= allowed:
+				self.stable_id_by_track[tid] = sid
+				rec['last_center'] = center
+				rec['last_bbox'] = bbox
+				rec['last_frame'] = frame_idx
+				rec['track_ids'].add(tid)
+				assigned_tracks.add(i)
+				assigned_stable.add(sid)
+
+		# Unassigned tracks become new stable persons
+		for i, (tid, bbox, center, scale) in enumerate(curr):
+			if i in assigned_tracks:
+				continue
+			if tid in self.stable_id_by_track:
+				# refresh existing mapping if any
+				sid = self.stable_id_by_track[tid]
+				rec = self.stable_persons.get(sid)
 				if rec is not None:
 					rec['last_center'] = center
 					rec['last_bbox'] = bbox
 					rec['last_frame'] = frame_idx
-					rec['track_ids'].add(track_id)
-
-		# Try to associate unmapped tracks to existing stable persons
-		for track_id, bbox, center, scale in visible_tracks:
-			if track_id in self.stable_id_by_track:
+					rec['track_ids'].add(tid)
 				continue
-			best_stable = None
-			best_score = -1.0
-			for stable_id, rec in self.stable_persons.items():
-				if frame_idx - rec['last_frame'] > self.match_max_frame_gap:
-					continue
-				iou = self._iou(bbox, rec['last_bbox']) if rec['last_bbox'] is not None else 0.0
-				dist = self._euclidean(center, rec['last_center']) if rec['last_center'] is not None else 1e9
-				allowed = self.match_center_dist_ratio * max(scale, 1.0)
-				# scoring: prefer IoU, fallback to distance
-				score = iou if iou >= self.match_iou_threshold else (-dist / max(allowed, 1.0))
-				if score > best_score:
-					best_score = score
-					best_stable = stable_id
-			# Accept if IoU is good or distance small enough
-			if best_stable is not None:
-				rec = self.stable_persons[best_stable]
-				iou = self._iou(bbox, rec['last_bbox']) if rec['last_bbox'] is not None else 0.0
-				dist = self._euclidean(center, rec['last_center']) if rec['last_center'] is not None else 1e9
-				allowed = self.match_center_dist_ratio * scale
-				if iou >= self.match_iou_threshold or dist <= allowed:
-					self.stable_id_by_track[track_id] = best_stable
-					rec['last_center'] = center
-					rec['last_bbox'] = bbox
-					rec['last_frame'] = frame_idx
-					rec['track_ids'].add(track_id)
-					continue
-			# Create new stable person
-			stable_id = self.next_stable_id
+			sid = self.next_stable_id
 			self.next_stable_id += 1
-			self.stable_persons[stable_id] = {
+			self.stable_persons[sid] = {
 				'last_center': center,
 				'last_bbox': bbox,
 				'last_frame': frame_idx,
-				'track_ids': {track_id},
+				'track_ids': {tid},
 			}
-			self.stable_id_by_track[track_id] = stable_id
+			self.stable_id_by_track[tid] = sid
 
 	def process_frame(self, frame, yolo_model, tracker, frame_idx, sahi_model=None):
 		"""Run detection (YOLO + optional SAHI), deduplicate, track, and update stats."""
