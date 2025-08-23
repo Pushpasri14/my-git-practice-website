@@ -46,6 +46,7 @@ class PersonCounter:
 		self.track_area_history = defaultdict(list)
 		self.max_simultaneous_confirmed = 0
 		self.max_simultaneous_frame = 0
+		self.unique_person_ids = set()  # unique identities across entire video (by track id)
 
 		# Detection config
 		self.conf_threshold = 0.25  # direct YOLO
@@ -196,6 +197,7 @@ class PersonCounter:
 			self.frames_seen[track_id] += 1
 			if self.frames_seen[track_id] >= self.min_track_length:
 				self.confirmed_ids.add(track_id)
+				self.unique_person_ids.add(track_id)
 
 		current_confirmed_active = len(self.confirmed_ids & self.active_ids)
 		if current_confirmed_active > self.max_simultaneous_confirmed:
@@ -230,8 +232,9 @@ class PersonCounter:
 		# Stats header
 		active_confirmed = len(self.confirmed_ids & self.active_ids)
 		cv2.putText(frame, f"CONFIRMED: {active_confirmed}  MAX: {self.max_simultaneous_confirmed}", (24, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2)
-		cv2.putText(frame, f"ACTIVE: {len(self.active_ids)}  DETS(Y/S/All): {len(yolo_dets)}/{len(sahi_dets)}/{len(all_dets)}", (24, 75), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2)
-		cv2.putText(frame, f"Frame: {frame_idx}/{total_frames}", (24, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+		cv2.putText(frame, f"UNIQUE: {len(self.unique_person_ids)}", (24, 72), cv2.FONT_HERSHEY_SIMPLEX, 0.95, (0, 255, 255), 2)
+		cv2.putText(frame, f"ACTIVE: {len(self.active_ids)}  DETS(Y/S/All): {len(yolo_dets)}/{len(sahi_dets)}/{len(all_dets)}", (24, 104), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2)
+		cv2.putText(frame, f"Frame: {frame_idx}/{total_frames}", (24, 136), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
 
 
 def main():
@@ -264,13 +267,26 @@ def main():
 			print('Failed to initialize SAHI model:', e)
 			sahi_model = None
 
-	# Tracker tuned for stability
-	tracker = DeepSort(
-		max_age=30,
-		n_init=3,
-		max_cosine_distance=0.6,
-		nn_budget=150,
-	)
+	# Tracker tuned for stability + enable embedder for re-id when available
+	try:
+		tracker = DeepSort(
+			max_age=60,
+			n_init=3,
+			max_cosine_distance=0.5,
+			nn_budget=200,
+			embedder='mobilenet',
+			embedder_gpu=True,
+			half=True,
+			bgr=True,
+		)
+	except Exception:
+		# Fallback without embedder
+		tracker = DeepSort(
+			max_age=60,
+			n_init=3,
+			max_cosine_distance=0.5,
+			nn_budget=200,
+		)
 
 	counter = PersonCounter()
 
@@ -313,7 +329,7 @@ def main():
 	elapsed = time.time() - start
 	print("\nProcessing done.")
 	print(f"Max simultaneous confirmed: {counter.max_simultaneous_confirmed} at frame {counter.max_simultaneous_frame}")
-	print(f"Total confirmed ids: {len(counter.confirmed_ids)}")
+	print(f"Unique persons (by confirmed tracks): {len(counter.unique_person_ids)}")
 	print(f"Elapsed: {elapsed:.1f}s")
 
 
