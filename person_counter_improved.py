@@ -18,62 +18,111 @@ except Exception as e:
 	print("Install with: pip install deep-sort-realtime")
 	raise
 
+# SAHI optional import
+SAHI_AVAILABLE = True
+try:
+	from sahi.models.ultralytics import UltralyticsDetectionModel
+	from sahi.predict import get_sliced_prediction
+except Exception as e:
+	print("SAHI not installed or import failed:", e)
+	print("Install with: pip install sahi")
+	SAHI_AVAILABLE = False
+
 
 class PersonCounter:
-	"""Simplified high-accuracy person counter with YOLO + DeepSort.
+	"""High-accuracy person counter with YOLO + DeepSort + SAHI (for top/overhead views).
 
-	- Uses a single strong YOLO model pass
-	- Applies NMS and class filtering via Ultralytics API
-	- Feeds detections to DeepSort in the expected format
-	- Minimal pre-filters to avoid suppressing true positives
-	- Tracks confirmed people, logs stats, renders overlays
+	- One YOLO pass per frame (higher imgsz) for regular-size persons
+	- SAHI multi-scale slicing for small/overhead persons
+	- IoU-based deduplication between YOLO and SAHI detections
+	- Proper DeepSort detection tuple format
+	- Tuned minimal size filters to include small top-view humans
 	"""
 
 	def __init__(self):
 		self.confirmed_ids = set()
 		self.active_ids = set()
-		self.rejected_ids = set()
 		self.frames_seen = defaultdict(int)
 		self.track_area_history = defaultdict(list)
 		self.max_simultaneous_confirmed = 0
 		self.max_simultaneous_frame = 0
 
-		# Detection config (tuned moderate)
-		self.conf_threshold = 0.25
-		self.iou_threshold = 0.45
-		self.max_det = 300
+		# Detection config
+		self.conf_threshold = 0.25  # direct YOLO
+		self.iou_threshold = 0.45   # NMS for YOLO
+		self.max_det = 400
+		self.imgsz = 960           # larger for better small-object recall
 
-		# Size constraints to suppress obvious noise
-		self.min_width = 8
-		self.min_height = 12
-		self.min_area = 100
+		# SAHI config (small + medium slices)
+		self.sahi_confs = [
+			{"slice_height": 256, "slice_width": 256, "overlap": 0.25, "conf": 0.15},
+			{"slice_height": 512, "slice_width": 512, "overlap": 0.30, "conf": 0.18},
+		]
+
+		# Size constraints to suppress obvious noise but keep small top-view humans
+		self.min_width = 6
+		self.min_height = 8
+		self.min_area = 64
 
 		# Track confirmation
 		self.min_track_length = 3
 
-	def _bbox_width_height_area(self, xyxy):
+		# Deduplication
+		self.dup_iou_threshold = 0.5
+
+	@staticmethod
+	def _bbox_width_height_area(xyxy):
 		x1, y1, x2, y2 = xyxy
 		w = max(0.0, x2 - x1)
 		h = max(0.0, y2 - y1)
 		return w, h, w * h
 
-	def process_frame(self, frame, yolo_model, tracker, frame_idx):
-		"""Run detection, tracking, and bookkeeping on a single frame."""
-		h, w = frame.shape[:2]
+	@staticmethod
+	def _iou(b1, b2):
+		x1, y1, x2, y2 = b1
+		x1b, y1b, x2b, y2b = b2
+		xi1 = max(x1, x1b)
+		yi1 = max(y1, y1b)
+		xi2 = min(x2, x2b)
+		yi2 = min(y2, y2b)
+		if xi2 <= xi1 or yi2 <= yi1:
+			return 0.0
+		inter = (xi2 - xi1) * (yi2 - yi1)
+		area1 = max(0.0, (x2 - x1)) * max(0.0, (y2 - y1))
+		area2 = max(0.0, (x2b - x1b)) * max(0.0, (y2b - y1b))
+		union = area1 + area2 - inter
+		return inter / union if union > 0 else 0.0
 
-		# 1) Run YOLO once per frame for person class only (class 0)
+	def _deduplicate(self, dets):
+		"""Deduplicate detections by IoU keeping higher-confidence ones.
+		Input: list of (bbox[x1,y1,x2,y2], conf, cls)
+		"""
+		unique = []
+		for bbox, conf, cls in dets:
+			replace_idx = -1
+			best_iou = 0.0
+			for j, (ubox, uconf, ucls) in enumerate(unique):
+				iou = self._iou(bbox, ubox)
+				if iou > self.dup_iou_threshold and iou > best_iou:
+					best_iou = iou
+					replace_idx = j
+			if replace_idx >= 0:
+				if conf > unique[replace_idx][1]:
+					unique[replace_idx] = (bbox, conf, cls)
+			else:
+				unique.append((bbox, conf, cls))
+		return unique
+
+	def _run_yolo(self, frame, yolo_model):
 		results = yolo_model(
 			frame,
 			conf=self.conf_threshold,
 			iou=self.iou_threshold,
 			classes=[0],
 			max_det=self.max_det,
+			imgsz=self.imgsz,
 			verbose=False,
 		)
-
-		# 2) Convert detections to DeepSort expected format
-		# deep_sort_realtime expects: list of [ [x1,y1,x2,y2], confidence, class ]
-		# Optionally a dict: {"feature":..., "detector":...}
 		detections = []
 		if results:
 			for r in results:
@@ -85,18 +134,56 @@ class PersonCounter:
 				for i in range(len(xyxy)):
 					x1, y1, x2, y2 = [float(v) for v in xyxy[i]]
 					conf = float(confs[i])
-
-					# Minimal size filter to reduce noise
 					bw, bh, ba = self._bbox_width_height_area((x1, y1, x2, y2))
 					if bw < self.min_width or bh < self.min_height or ba < self.min_area:
 						continue
-
 					detections.append(([x1, y1, x2, y2], conf, 'person'))
+		return detections
 
-		# 3) Update tracker
-		tracks = tracker.update_tracks(detections, frame=frame)
+	def _run_sahi(self, frame, sahi_model):
+		detections = []
+		if not SAHI_AVAILABLE or sahi_model is None:
+			return detections
+		for cfg in self.sahi_confs:
+			try:
+				res = get_sliced_prediction(
+					frame,
+					sahi_model,
+					slice_height=cfg["slice_height"],
+					slice_width=cfg["slice_width"],
+					overlap_height_ratio=cfg["overlap"],
+					overlap_width_ratio=cfg["overlap"],
+				)
+				for obj in res.object_prediction_list:
+					# Ultralytics model: person class id is typically 0
+					if getattr(obj.category, 'id', 0) != 0:
+						continue
+					x1, y1, x2, y2 = obj.bbox.to_xyxy()
+					conf = float(obj.score.value)
+					bw, bh, ba = self._bbox_width_height_area((x1, y1, x2, y2))
+					if bw < self.min_width or bh < self.min_height or ba < self.min_area:
+						continue
+					detections.append(([float(x1), float(y1), float(x2), float(y2)], conf, 'person'))
+			except Exception:
+				# If SAHI fails for a slice size, skip it
+				continue
+		return detections
 
-		# 4) Bookkeeping and stats
+	def process_frame(self, frame, yolo_model, tracker, frame_idx, sahi_model=None):
+		"""Run detection (YOLO + optional SAHI), deduplicate, track, and update stats."""
+		# 1) Direct YOLO detections
+		yolo_dets = self._run_yolo(frame, yolo_model)
+
+		# 2) SAHI detections for small/overhead
+		sahi_dets = self._run_sahi(frame, sahi_model) if sahi_model is not None else []
+
+		# 3) Merge and deduplicate
+		all_dets = self._deduplicate(yolo_dets + sahi_dets)
+
+		# 4) Update tracker
+		tracks = tracker.update_tracks(all_dets, frame=frame)
+
+		# 5) Bookkeeping and stats
 		self.active_ids.clear()
 		for t in tracks:
 			if not t.is_confirmed():
@@ -104,10 +191,9 @@ class PersonCounter:
 			track_id = t.track_id
 			self.active_ids.add(track_id)
 			ltrb = t.to_ltrb()
-			bw, bh, ba = self._bbox_width_height_area(ltrb)
+			_, _, ba = self._bbox_width_height_area(ltrb)
 			self.track_area_history[track_id].append(ba)
 			self.frames_seen[track_id] += 1
-
 			if self.frames_seen[track_id] >= self.min_track_length:
 				self.confirmed_ids.add(track_id)
 
@@ -116,13 +202,18 @@ class PersonCounter:
 			self.max_simultaneous_confirmed = current_confirmed_active
 			self.max_simultaneous_frame = frame_idx
 
-		return tracks, detections
+		return tracks, all_dets, yolo_dets, sahi_dets
 
-	def draw_overlays(self, frame, tracks, detections, frame_idx, total_frames):
-		# Draw detections (thin cyan)
-		for (x1, y1, x2, y2), conf, _ in detections:
+	def draw_overlays(self, frame, tracks, all_dets, yolo_dets, sahi_dets, frame_idx, total_frames):
+		# Draw YOLO detections (thin cyan)
+		for (x1, y1, x2, y2), conf, _ in yolo_dets:
 			cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (255, 255, 0), 1)
-			cv2.putText(frame, f"{conf:.2f}", (int(x1), int(y1) - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 0), 1)
+			cv2.putText(frame, f"Y {conf:.2f}", (int(x1), int(y1) - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 0), 1)
+
+		# Draw SAHI detections (thin magenta)
+		for (x1, y1, x2, y2), conf, _ in sahi_dets:
+			cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (255, 0, 255), 1)
+			cv2.putText(frame, f"S {conf:.2f}", (int(x1), int(y1) - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 0, 255), 1)
 
 		# Draw tracks (green for confirmed, orange for warming)
 		for t in tracks:
@@ -139,7 +230,7 @@ class PersonCounter:
 		# Stats header
 		active_confirmed = len(self.confirmed_ids & self.active_ids)
 		cv2.putText(frame, f"CONFIRMED: {active_confirmed}  MAX: {self.max_simultaneous_confirmed}", (24, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2)
-		cv2.putText(frame, f"ACTIVE TRACKS: {len(self.active_ids)}  DETS: {len(detections)}", (24, 75), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2)
+		cv2.putText(frame, f"ACTIVE: {len(self.active_ids)}  DETS(Y/S/All): {len(yolo_dets)}/{len(sahi_dets)}/{len(all_dets)}", (24, 75), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2)
 		cv2.putText(frame, f"Frame: {frame_idx}/{total_frames}", (24, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
 
 
@@ -164,6 +255,15 @@ def main():
 
 	model = YOLO(model_path)
 
+	# SAHI detection model (if available)
+	sahi_model = None
+	if SAHI_AVAILABLE:
+		try:
+			sahi_model = UltralyticsDetectionModel(model_path=model_path, confidence_threshold=0.15)
+		except Exception as e:
+			print('Failed to initialize SAHI model:', e)
+			sahi_model = None
+
 	# Tracker tuned for stability
 	tracker = DeepSort(
 		max_age=30,
@@ -187,7 +287,7 @@ def main():
 	fourcc = cv2.VideoWriter_fourcc(*'XVID')
 	out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
 
-	print(f"Model: {model_path} | Video: {video_path} | FPS: {fps:.1f}")
+	print(f"Model: {model_path} | Video: {video_path} | FPS: {fps:.1f} | SAHI: {'on' if sahi_model is not None else 'off'}")
 	print("Starting processing...")
 	start = time.time()
 
@@ -198,11 +298,11 @@ def main():
 			break
 		frame_idx += 1
 
-		tracks, detections = counter.process_frame(frame, model, tracker, frame_idx)
-		counter.draw_overlays(frame, tracks, detections, frame_idx, total_frames)
+		tracks, all_dets, yolo_dets, sahi_dets = counter.process_frame(frame, model, tracker, frame_idx, sahi_model)
+		counter.draw_overlays(frame, tracks, all_dets, yolo_dets, sahi_dets, frame_idx, total_frames)
 
 		out.write(frame)
-		cv2.imshow('Person Counter (Improved)', frame)
+		cv2.imshow('Person Counter (Improved + SAHI)', frame)
 		if cv2.waitKey(1) & 0xFF == ord('q'):
 			break
 
